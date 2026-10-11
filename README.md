@@ -19,6 +19,8 @@ and a browser viewer with sound.
 
 ![viewer](docs/viewer.png)
 
+**Website and live sample replay:** https://crunchy000.github.io/petting-zoo-micro-rts/ (deployed from [`docs/site`](docs/site) by the `pages` workflow).
+
 ## Install
 
 ```bash
