@@ -1,0 +1,187 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MicroRTS for PettingZoo</title>
+<meta name="description" content="MicroRTS as a PettingZoo multi-agent environment: pure-Python engine, action masks and a browser viewer with sound.">
+<style>
+  :root {
+    --bg: #0b0f16; --panel: #121925; --panel-2: #182131; --line: #243047;
+    --text: #e6edf6; --muted: #8a99b2; --p0: #3fa7ff; --p1: #ff5d73; --ore: #5ee6a8;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--p0); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 16px; }
+  header { border-bottom: 1px solid var(--line); background: var(--panel); }
+  header .wrap { display: flex; align-items: center; gap: 16px; padding-top: 14px; padding-bottom: 14px; flex-wrap: wrap; }
+  header strong { font-size: 17px; }
+  header nav { display: flex; gap: 16px; flex-wrap: wrap; margin-left: auto; font-size: 14px; }
+  header nav a { color: var(--muted); text-decoration: none; }
+  header nav a:hover { color: var(--text); }
+  .hero { padding: 48px 0 24px; }
+  .hero h1 { font-size: clamp(28px, 5vw, 44px); line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.01em; }
+  .hero h1 span { color: var(--p0); }
+  .hero p { color: var(--muted); max-width: 680px; font-size: 18px; margin: 0 0 20px; }
+  .btns { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn { display: inline-block; padding: 9px 16px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); text-decoration: none; font-weight: 600; font-size: 15px; }
+  .btn.primary { background: var(--p0); border-color: var(--p0); color: #04121f; }
+  .demo { margin: 28px 0 8px; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--panel); }
+  .demo iframe { display: block; width: 100%; height: min(78vh, 760px); border: 0; }
+  .demo .cap { padding: 10px 14px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line);
+    display: flex; gap: 12px; flex-wrap: wrap; justify-content: space-between; }
+  section { padding: 28px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 24px; margin: 0 0 12px; }
+  h3 { font-size: 18px; margin: 22px 0 8px; }
+  p, li { color: #cdd6e4; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .card b { display: block; margin-bottom: 4px; }
+  .card span { color: var(--muted); font-size: 15px; }
+  pre { background: #0f1520; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow-x: auto;
+    font: 13.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #dbe5f3; margin: 10px 0 16px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+  p code, li code, td code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
+  .k { color: #ff9ac1; } .s { color: var(--ore); } .c { color: #6b7a93; } .f { color: #8cc8ff; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; margin: 8px 0 16px; display: block; overflow-x: auto; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+  footer { border-top: 1px solid var(--line); padding: 24px 0 40px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<header><div class="wrap">
+  <strong>MicroRTS · PettingZoo</strong>
+  <nav>
+    <a href="#install">Install</a><a href="#usage">Usage</a><a href="#env">Environment</a>
+    <a href="#viewer">Viewer</a><a href="#license">License</a><a href="https://github.com/Crunchy000/petting-zoo-micro-rts">GitHub</a>
+  </nav>
+</div></header>
+
+<main class="wrap">
+  <div class="hero">
+    <h1>MicroRTS as a <span>PettingZoo</span> environment</h1>
+    <p>A two-player real-time strategy game for multi-agent RL. The engine is pure Python, matches the original Java engine tick for tick, and comes with action masks and a browser viewer with sound.</p>
+    <div class="btns">
+      <a class="btn primary" href="#usage">Get started</a>
+      <a class="btn" href="replay.html">Open the sample replay</a>
+      <a class="btn" href="https://github.com/Crunchy000/petting-zoo-micro-rts">Source on GitHub</a>
+    </div>
+  </div>
+
+  <div class="demo">
+    <iframe src="replay.html" title="Sample MicroRTS replay" loading="lazy"></iframe>
+    <div class="cap">
+      <span>Worker rush (blue) vs. light-unit rush (red) on <code>basesWorkers16x16</code>, played by the bundled bots.</span>
+      <span>Space: play/pause · ←/→: step · m: sound · <a href="replay-random.html">another game</a></span>
+    </div>
+  </div>
+
+  <section>
+    <div class="grid">
+      <div class="card"><b>PettingZoo-native</b><span>A Parallel env, plus the AEC version. Passes <code>parallel_api_test</code>, <code>api_test</code>, both seed tests and <code>render_test</code>.</span></div>
+      <div class="card"><b>No JVM</b><span>The MicroRTS rules are ported to NumPy, so <code>pip install</code> is all you need. CI compares it against the Java engine on every push.</span></div>
+      <div class="card"><b>Action masks</b><span>Every observation includes a mask, and <code>action_space.sample(mask)</code> picks only legal moves.</span></div>
+      <div class="card"><b>Viewer with sound</b><span>A canvas renderer that shows games live while they run, or saves them as one-file HTML replays.</span></div>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <pre>git clone https://github.com/Crunchy000/petting-zoo-micro-rts
+cd petting-zoo-micro-rts
+pip install -e .            <span class="c"># numpy, gymnasium, pettingzoo</span>
+pip install -e ".[test]"    <span class="c"># + pytest</span></pre>
+  </section>
+
+  <section id="usage">
+    <h2>Usage</h2>
+    <h3>Parallel API (both players act every tick)</h3>
+    <pre><span class="k">from</span> microrts_pz <span class="k">import</span> microrts_v0
+
+env = microrts_v0.<span class="f">parallel_env</span>(map_path=<span class="s">"maps/16x16/basesWorkers16x16.xml"</span>, max_steps=<span class="s">2000</span>)
+observations, infos = env.<span class="f">reset</span>(seed=<span class="s">42</span>)
+
+<span class="k">while</span> env.agents:
+    actions = {
+        agent: env.<span class="f">action_space</span>(agent).<span class="f">sample</span>(observations[agent][<span class="s">"action_mask"</span>])
+        <span class="k">for</span> agent <span class="k">in</span> env.agents
+    }
+    observations, rewards, terminations, truncations, infos = env.<span class="f">step</span>(actions)
+env.<span class="f">close</span>()</pre>
+
+    <h3>AEC API</h3>
+    <pre>env = microrts_v0.<span class="f">env</span>(map_path=<span class="s">"maps/8x8/basesWorkers8x8A.xml"</span>)
+env.<span class="f">reset</span>(seed=<span class="s">0</span>)
+<span class="k">for</span> agent <span class="k">in</span> env.<span class="f">agent_iter</span>():
+    obs, reward, termination, truncation, info = env.<span class="f">last</span>()
+    action = <span class="k">None if</span> termination <span class="k">or</span> truncation <span class="k">else</span> env.<span class="f">action_space</span>(agent).<span class="f">sample</span>(obs[<span class="s">"action_mask"</span>])
+    env.<span class="f">step</span>(action)</pre>
+
+    <h3>Play against a scripted bot</h3>
+    <pre><span class="k">from</span> microrts_pz.bots <span class="k">import</span> WorkerRushBot
+
+bot = <span class="f">WorkerRushBot</span>(harvesters=<span class="s">2</span>, army=<span class="s">"Light"</span>)
+actions[<span class="s">"player_1"</span>] = bot.<span class="f">act</span>(env.unwrapped.game, player=<span class="s">1</span>).<span class="f">reshape</span>(-<span class="s">1</span>)</pre>
+  </section>
+
+  <section id="env">
+    <h2>Environment</h2>
+    <table>
+      <tr><th>Agents</th><td><code>player_0</code>, <code>player_1</code> (simultaneous moves)</td></tr>
+      <tr><th>Action space</th><td>flat <code>MultiDiscrete</code> of shape <code>(H·W·7,)</code>, one 7-part action per map cell</td></tr>
+      <tr><th>Observation</th><td><code>Dict(observation=Box(0,1,(H,W,29),int8), action_mask=Box(0,1,(H·W·78,),int8))</code></td></tr>
+      <tr><th>State</th><td><code>env.state()</code>: fully observed planes, <code>(H,W,29)</code></td></tr>
+      <tr><th>Termination</th><td>one side has no units left (<code>infos[agent]["winner"]</code>)</td></tr>
+      <tr><th>Truncation</th><td><code>max_steps</code> ticks (default 2000)</td></tr>
+    </table>
+    <h3>Per-cell action</h3>
+    <p>The action for a cell is read only when the cell holds one of your idle units. Illegal actions turn into a wait of the same length, as in MicroRTS, so use the mask.</p>
+    <table>
+      <tr><th>Component</th><th>Values</th></tr>
+      <tr><td>action type</td><td>0 wait, 1 move, 2 harvest, 3 return, 4 produce, 5 attack</td></tr>
+      <tr><td>move / harvest / return / produce direction</td><td>0 up, 1 right, 2 down, 3 left</td></tr>
+      <tr><td>produce unit type</td><td>0 Resource, 1 Base, 2 Barracks, 3 Worker, 4 Light, 5 Heavy, 6 Ranged</td></tr>
+      <tr><td>attack target</td><td>0–48: a cell in the 7×7 square around the unit, <code>(dy+3)*7 + (dx+3)</code></td></tr>
+    </table>
+    <h3>Rewards</h3>
+    <p><code>infos[agent]["raw_rewards"]</code> holds six components: win/loss, resources gathered, workers produced, buildings produced, attacks on enemies and combat units produced. The scalar reward is <code>reward_weight @ raw_rewards</code>, with a default of <code>(10, 1, 1, 0.2, 1, 4)</code>. Pass <code>reward_weight=(1, 0, 0, 0, 0, 0)</code> for pure win/loss.</p>
+    <h3>Options</h3>
+    <table>
+      <tr><th>Argument</th><th>Default</th><th></th></tr>
+      <tr><td><code>map_path</code></td><td><code>maps/16x16/basesWorkers16x16.xml</code></td><td>any of the 95 bundled maps (<code>microrts_pz.list_maps()</code>) or your own XML</td></tr>
+      <tr><td><code>max_steps</code></td><td><code>2000</code></td><td>truncation horizon</td></tr>
+      <tr><td><code>partial_obs</code></td><td><code>False</code></td><td>fog of war, adds 2 visibility planes</td></tr>
+      <tr><td><code>unit_type_table_version</code></td><td><code>1</code></td><td>1 original, 2 fine-tuned, 3 random damage</td></tr>
+      <tr><td><code>render_mode</code></td><td><code>None</code></td><td><code>"human"</code>, <code>"rgb_array"</code>, <code>"ansi"</code></td></tr>
+      <tr><td><code>record_replay</code></td><td><code>False</code></td><td>keep frames for <code>env.save_replay(path)</code></td></tr>
+    </table>
+  </section>
+
+  <section id="viewer">
+    <h2>Viewer</h2>
+    <p><b>Replays.</b> Record an episode and save it as one HTML file with no external dependencies. The demo above was made this way.</p>
+    <pre>env = microrts_v0.<span class="f">parallel_env</span>(record_replay=<span class="k">True</span>)
+env.<span class="f">reset</span>(seed=<span class="s">0</span>)
+...  <span class="c"># play</span>
+env.<span class="f">save_replay</span>(<span class="s">"game.html"</span>)</pre>
+    <p><b>Live.</b> <code>render_mode="human"</code> starts a local server on 127.0.0.1, opens your browser and streams every tick to it. You can pause and scrub back while the game keeps running.</p>
+    <pre>python examples/replay_bots.py --out replay.html   <span class="c"># save a bot game</span>
+python examples/replay_bots.py --live              <span class="c"># watch it live</span></pre>
+    <p>Sound effects are generated with the Web Audio API and panned by map position. Browsers only play audio after a click, so press 🔇 to turn it on.</p>
+  </section>
+
+  <section id="license">
+    <h2>License &amp; credits</h2>
+    <p>GPL-3.0, because the engine and the bundled maps derive from <a href="https://github.com/Farama-Foundation/MicroRTS">MicroRTS</a> by Santiago Ontañón. The interface follows <a href="https://github.com/Farama-Foundation/MicroRTS-Py">MicroRTS-Py / Gym-µRTS</a> (MIT), and its notice is kept in <a href="https://github.com/Crunchy000/petting-zoo-micro-rts/blob/main/THIRD_PARTY_NOTICES.md">THIRD_PARTY_NOTICES.md</a>. If you use this environment, please cite MicroRTS and Gym-µRTS (BibTeX is in the <a href="https://github.com/Crunchy000/petting-zoo-micro-rts#citing">README</a>).</p>
+  </section>
+</main>
+
+<footer><div class="wrap">This site was built and deployed by GitHub Actions from <code>docs/site</code>. The sample replays are regenerated on every deploy.</div></footer>
+</body>
+</html>
