@@ -1,0 +1,536 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- MicroRTS canvas viewer: replays (data embedded below) or live games (Server-Sent Events). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MicroRTS Viewer</title>
+<style>
+  :root {
+    --bg: #0b0f16; --panel: #121925; --panel-2: #182131; --line: #243047;
+    --text: #e6edf6; --muted: #8a99b2; --p0: #3fa7ff; --p1: #ff5d73; --gold: #5ee6a8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel);
+    border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  header .map { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  .side { display: flex; align-items: center; gap: 10px; padding: 4px 10px; border-radius: 8px; background: var(--panel-2); }
+  .side .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .side .name { font-weight: 600; }
+  .side .stat { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .side .stat b { color: var(--text); font-weight: 600; }
+  main { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; position: relative; }
+  canvas#board { display: block; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+  #banner { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 18px 32px; border-radius: 14px;
+    background: rgba(10,14,22,.86); border: 1px solid var(--line); font-size: 26px; font-weight: 700; display: none;
+    text-align: center; pointer-events: none; }
+  #banner small { display: block; font-size: 13px; font-weight: 400; color: var(--muted); margin-top: 4px; }
+  #tip { position: fixed; pointer-events: none; background: rgba(10,14,22,.95); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 9px; font-size: 12px; display: none; white-space: nowrap; z-index: 3; }
+  footer { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: var(--panel);
+    border-top: 1px solid var(--line); flex-wrap: wrap; }
+  button { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 10px; font: inherit; cursor: pointer; min-width: 36px; }
+  button:hover { border-color: #3a4a68; }
+  button.on { border-color: var(--p0); }
+  input[type=range] { accent-color: var(--p0); }
+  #timeline { flex: 1; min-width: 160px; }
+  .label { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #live { color: var(--gold); font-weight: 600; font-size: 12px; display: none; }
+  #legend { display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: 12px; }
+  #legend canvas { vertical-align: middle; }
+  @media (max-width: 640px) { #legend { display: none; } header { gap: 8px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>MicroRTS</h1><span class="map" id="mapname"></span>
+  <span class="spacer"></span>
+  <div class="side" id="side0"><span class="dot" style="background:var(--p0)"></span><span class="name">P0</span>
+    <span class="stat">ore <b id="res0">0</b></span><span class="stat">units <b id="cnt0">0</b></span></div>
+  <div class="side" id="side1"><span class="dot" style="background:var(--p1)"></span><span class="name">P1</span>
+    <span class="stat">ore <b id="res1">0</b></span><span class="stat">units <b id="cnt1">0</b></span></div>
+</header>
+<main id="stage"><canvas id="board"></canvas><div id="banner"></div></main>
+<div id="tip"></div>
+<footer>
+  <button id="play" title="Play / pause (space)">▶</button>
+  <button id="back" title="Step back (←)">⏮</button>
+  <button id="fwd" title="Step forward (→)">⏭</button>
+  <input type="range" id="timeline" min="0" max="0" value="0" step="1" aria-label="Timeline">
+  <span class="label" id="tick">t = 0</span>
+  <span id="live">● LIVE</span>
+  <span class="label">speed</span>
+  <select id="speed" aria-label="Playback speed">
+    <option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option>
+    <option value="2">2×</option><option value="4">4×</option><option value="8">8×</option>
+  </select>
+  <button id="sound" title="Sound (m)">🔇</button>
+  <input type="range" id="volume" min="0" max="1" step="0.05" value="0.6" aria-label="Volume" style="width:80px">
+  <span id="legend"></span>
+</footer>
+<script>
+/*__MICRORTS_DATA__*/
+</script>
+<script>
+"use strict";
+// ------------------------------------------------------------------ state
+const TICKS_PER_SEC = 40;                       // playback rate at 1x
+const DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+const ACT = { NONE: 0, MOVE: 1, HARVEST: 2, RETURN: 3, PRODUCE: 4, ATTACK: 5 };
+const css = getComputedStyle(document.documentElement);
+const COLORS = [css.getPropertyValue("--p0").trim(), css.getPropertyValue("--p1").trim()];
+const ORE = css.getPropertyValue("--gold").trim();
+
+let meta = null, frames = [], typeNames = [];
+let playhead = 0, playing = false, speed = 1, follow = true;
+let lastFrameIdx = -1, lastTs = 0;
+const particles = [], floaters = [];
+const isLive = !!window.MICRORTS_LIVE;
+
+const $ = id => document.getElementById(id);
+const canvas = $("board");
+let ctx = canvas.getContext("2d");
+let cell = 32, dpr = 1;
+
+// ------------------------------------------------------------------ audio
+const Sound = {
+  ctx: null, master: null, enabled: false, volume: 0.6, last: {},
+  init() {
+    if (this.ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = this.volume;
+    const comp = this.ctx.createDynamicsCompressor();
+    this.master.connect(comp).connect(this.ctx.destination);
+  },
+  toggle(force) {
+    this.init();
+    if (!this.ctx) return;
+    this.enabled = force === undefined ? !this.enabled : force;
+    if (this.enabled && this.ctx.state === "suspended") this.ctx.resume();
+    $("sound").textContent = this.enabled ? "🔊" : "🔇";
+    $("sound").classList.toggle("on", this.enabled);
+  },
+  setVolume(v) { this.volume = v; if (this.master) this.master.gain.value = v; },
+  ok(kind, gap) {                                  // rate-limit each sound kind
+    if (!this.enabled || !this.ctx) return false;
+    const now = this.ctx.currentTime;
+    if (this.last[kind] !== undefined && now - this.last[kind] < gap) return false;
+    this.last[kind] = now; return true;
+  },
+  out(pan) {
+    const p = this.ctx.createStereoPanner ? this.ctx.createStereoPanner() : null;
+    if (p) { p.pan.value = Math.max(-1, Math.min(1, pan || 0)); p.connect(this.master); return p; }
+    return this.master;
+  },
+  tone(freq, dur, { type = "sine", gain = 0.2, to = null, delay = 0, pan = 0 } = {}) {
+    const t = this.ctx.currentTime + delay, o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    if (to) o.frequency.exponentialRampToValueAtTime(to, t + dur);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(gain, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(this.out(pan)); o.start(t); o.stop(t + dur + 0.02);
+  },
+  noise(dur, { gain = 0.2, freq = 1200, to = null, kind = "lowpass", pan = 0 } = {}) {
+    const t = this.ctx.currentTime, n = Math.floor(this.ctx.sampleRate * dur);
+    const buf = this.ctx.createBuffer(1, n, this.ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const src = this.ctx.createBufferSource(), f = this.ctx.createBiquadFilter(), g = this.ctx.createGain();
+    src.buffer = buf; f.type = kind; f.frequency.setValueAtTime(freq, t);
+    if (to) f.frequency.exponentialRampToValueAtTime(to, t + dur);
+    g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f).connect(g).connect(this.out(pan)); src.start(t);
+  },
+  play(kind, pan) {
+    switch (kind) {
+      case "melee":   if (this.ok(kind, 0.06)) this.noise(0.09, { gain: 0.12, freq: 2500, kind: "highpass", pan }); break;
+      case "shoot":   if (this.ok(kind, 0.06)) this.tone(1400, 0.12, { type: "square", gain: 0.05, to: 260, pan }); break;
+      case "hit":     if (this.ok(kind, 0.05)) this.tone(150, 0.09, { type: "sine", gain: 0.28, to: 70, pan }); break;
+      case "death":   if (this.ok(kind, 0.08)) { this.noise(0.45, { gain: 0.35, freq: 1400, to: 90, pan }); this.tone(70, 0.35, { gain: 0.3, to: 35, pan }); } break;
+      case "crumble": if (this.ok(kind, 0.15)) this.noise(0.3, { gain: 0.12, freq: 600, to: 150, pan }); break;
+      case "spawn":   if (this.ok(kind, 0.08)) [523, 659, 784].forEach((f, i) => this.tone(f, 0.12, { type: "triangle", gain: 0.09, delay: i * 0.05, pan })); break;
+      case "build":   if (this.ok(kind, 0.2)) [262, 330, 392, 523].forEach((f, i) => this.tone(f, 0.3, { type: "triangle", gain: 0.12, delay: i * 0.07, pan })); break;
+      case "harvest": if (this.ok(kind, 0.05)) this.tone(1760, 0.06, { type: "triangle", gain: 0.06, pan }); break;
+      case "deposit": if (this.ok(kind, 0.06)) { this.tone(988, 0.07, { type: "square", gain: 0.04, pan }); this.tone(1319, 0.14, { type: "square", gain: 0.04, delay: 0.07, pan }); } break;
+      case "victory": if (this.ok(kind, 2)) [392, 523, 659, 784, 1047].forEach((f, i) => this.tone(f, 0.45, { type: "triangle", gain: 0.14, delay: i * 0.12 })); break;
+    }
+  },
+};
+
+// --------------------------------------------------------------- data in
+function setMeta(m) {
+  meta = m; frames = []; playhead = 0; lastFrameIdx = -1; particles.length = 0; floaters.length = 0;
+  typeNames = m.unitTypes.map(u => u.name);
+  $("mapname").textContent = m.map + "  ·  " + m.width + "×" + m.height;
+  $("side0").querySelector(".name").textContent = m.players[0] || "P0";
+  $("side1").querySelector(".name").textContent = m.players[1] || "P1";
+  $("banner").style.display = "none";
+  buildLegend(); resize();
+}
+function pushFrame(f) {
+  frames.push(f);
+  $("timeline").max = Math.max(0, frames.length - 1);
+}
+
+if (window.MICRORTS_REPLAY) {
+  const R = window.MICRORTS_REPLAY;
+  if (R.title) document.title = R.title;
+  setMeta(R.meta); R.frames.forEach(pushFrame); follow = false;
+  setTimeout(() => setPlaying(true), 300);
+} else if (isLive) {
+  $("live").style.display = "inline";
+  const es = new EventSource("events");
+  es.addEventListener("reset", e => { setMeta(JSON.parse(e.data)); follow = true; setPlaying(true); });
+  es.onmessage = e => pushFrame(JSON.parse(e.data));
+}
+
+// ---------------------------------------------------------------- layout
+function resize() {
+  if (!meta) return;
+  const stage = $("stage"), pad = 24;
+  const avail = Math.min((stage.clientWidth - pad) / meta.width, (stage.clientHeight - pad) / meta.height);
+  cell = Math.max(8, Math.floor(avail));
+  dpr = window.devicePixelRatio || 1;
+  canvas.width = meta.width * cell * dpr; canvas.height = meta.height * cell * dpr;
+  canvas.style.width = meta.width * cell + "px"; canvas.style.height = meta.height * cell + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", resize);
+
+// ---------------------------------------------------------------- drawing
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function poly(pts) { ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); }
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  const f = v => Math.max(0, Math.min(255, Math.round(k > 0 ? v + (255 - v) * k : v * (1 + k))));
+  return `rgb(${f(r)},${f(g)},${f(b)})`;
+}
+
+function drawTerrain() {
+  const W = meta.width, H = meta.height;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const wall = meta.terrain[y * W + x] === "1";
+    if (wall) {
+      ctx.fillStyle = "#2a3242"; ctx.fillRect(x * cell, y * cell, cell, cell);
+      ctx.fillStyle = "#353f53"; ctx.fillRect(x * cell + 2, y * cell + 2, cell - 4, cell * 0.45);
+      ctx.fillStyle = "#1e2531"; ctx.fillRect(x * cell + 2, y * cell + cell * 0.55, cell - 4, cell * 0.4);
+    } else {
+      ctx.fillStyle = (x + y) % 2 ? "#151c27" : "#18202c";
+      ctx.fillRect(x * cell, y * cell, cell, cell);
+    }
+  }
+}
+
+function drawResource(cx, cy, amount) {
+  const s = cell * (0.28 + 0.14 * Math.min(1, amount / 20));
+  ctx.save(); ctx.shadowColor = ORE; ctx.shadowBlur = cell * 0.35;
+  const g = ctx.createLinearGradient(cx, cy - s, cx, cy + s);
+  g.addColorStop(0, "#b9ffe0"); g.addColorStop(1, "#1fa874");
+  ctx.fillStyle = g;
+  poly([[cx, cy - s], [cx + s * 0.55, cy - s * 0.1], [cx + s * 0.3, cy + s * 0.8], [cx - s * 0.3, cy + s * 0.8], [cx - s * 0.55, cy - s * 0.1]]);
+  ctx.fill();
+  ctx.fillStyle = "#8ff5c8";
+  poly([[cx - s * 0.75, cy + s * 0.1], [cx - s * 0.45, cy - s * 0.35], [cx - s * 0.25, cy + s * 0.75], [cx - s * 0.7, cy + s * 0.75]]); ctx.fill();
+  poly([[cx + s * 0.75, cy + s * 0.2], [cx + s * 0.5, cy - s * 0.25], [cx + s * 0.3, cy + s * 0.8], [cx + s * 0.7, cy + s * 0.8]]); ctx.fill();
+  ctx.restore();
+  if (cell >= 22) {
+    ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.font = `600 ${Math.round(cell * 0.28)}px ui-sans-serif, system-ui`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(amount, cx, cy + s * 0.25);
+  }
+}
+
+function drawUnit(name, player, cx, cy, carrying, alpha) {
+  const col = COLORS[player] || "#999", dark = shade(col, -0.45), light = shade(col, 0.35);
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.shadowColor = col; ctx.shadowBlur = cell * 0.25; ctx.lineWidth = Math.max(1, cell * 0.06); ctx.strokeStyle = light;
+  const s = cell / 2;
+  switch (name) {
+    case "Base":
+      rr(cx - s * 0.86, cy - s * 0.86, s * 1.72, s * 1.72, s * 0.3); ctx.fillStyle = dark; ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.fillStyle = col;
+      poly([[cx, cy - s * 0.5], [cx + s * 0.45, cy], [cx, cy + s * 0.5], [cx - s * 0.45, cy]]); ctx.fill();
+      break;
+    case "Barracks":
+      rr(cx - s * 0.82, cy - s * 0.66, s * 1.64, s * 1.32, s * 0.18); ctx.fillStyle = dark; ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.fillStyle = col;
+      for (let i = -1; i <= 1; i++) ctx.fillRect(cx + i * s * 0.45 - s * 0.1, cy - s * 0.4, s * 0.2, s * 0.8);
+      break;
+    case "Worker":
+      ctx.beginPath(); ctx.arc(cx, cy, s * 0.42, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.fillStyle = dark; ctx.fillRect(cx - s * 0.06, cy - s * 0.25, s * 0.12, s * 0.5);
+      ctx.fillRect(cx - s * 0.22, cy - s * 0.25, s * 0.44, s * 0.11);
+      break;
+    case "Light":
+      ctx.beginPath(); ctx.arc(cx, cy, s * 0.55, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.fillStyle = dark; poly([[cx, cy - s * 0.38], [cx + s * 0.32, cy + s * 0.28], [cx - s * 0.32, cy + s * 0.28]]); ctx.fill();
+      break;
+    case "Heavy": {
+      const r = s * 0.72, pts = [];
+      for (let i = 0; i < 8; i++) { const a = Math.PI / 8 + i * Math.PI / 4; pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); }
+      poly(pts); ctx.fillStyle = col; ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.fillStyle = dark; rr(cx - s * 0.3, cy - s * 0.3, s * 0.6, s * 0.6, s * 0.1); ctx.fill();
+      break;
+    }
+    case "Ranged":
+      poly([[cx, cy - s * 0.7], [cx + s * 0.6, cy], [cx, cy + s * 0.7], [cx - s * 0.6, cy]]); ctx.fillStyle = col; ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.beginPath(); ctx.arc(cx, cy, s * 0.18, 0, Math.PI * 2); ctx.fillStyle = dark; ctx.fill();
+      break;
+    default:
+      ctx.beginPath(); ctx.arc(cx, cy, s * 0.4, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+  }
+  if (carrying) {
+    ctx.shadowColor = ORE; ctx.shadowBlur = cell * 0.2; ctx.fillStyle = ORE;
+    const gx = cx + s * 0.4, gy = cy - s * 0.4, gs = s * 0.18;
+    poly([[gx, gy - gs], [gx + gs, gy], [gx, gy + gs], [gx - gs, gy]]); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function hpBar(cx, cy, hp, max, player) {
+  if (max <= 1 && hp >= max) return;
+  const w = cell * 0.78, h = Math.max(2, cell * 0.08), x = cx - w / 2, y = cy + cell * 0.38;
+  ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(x - 1, y - 1, w + 2, h + 2);
+  const f = Math.max(0, hp / max);
+  ctx.fillStyle = f > 0.5 ? "#6fe08a" : f > 0.25 ? "#f2c94c" : "#ff6b6b"; ctx.fillRect(x, y, w * f, h);
+}
+
+function ring(cx, cy, r, frac, col) {
+  ctx.save(); ctx.lineWidth = Math.max(2, cell * 0.07); ctx.strokeStyle = "rgba(255,255,255,.12)";
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = col; ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac); ctx.stroke();
+  ctx.restore();
+}
+
+// unit tuple: [id, type, player, x, y, hp, carried, action, start, eta, p1, p2]
+function unitPos(u, now) {
+  let x = u[3], y = u[4];
+  if (u[7] === ACT.MOVE && u[9] > 0) {
+    const p = Math.max(0, Math.min(1, (now - u[8]) / u[9]));
+    x += DIRS[u[10]][0] * p; y += DIRS[u[10]][1] * p;
+  }
+  return [(x + 0.5) * cell, (y + 0.5) * cell];
+}
+
+function draw(now) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!meta) return;
+  drawTerrain();
+  const f = frames[Math.min(frames.length - 1, Math.floor(playhead))];
+  if (!f) return;
+  const byPos = new Map();
+  for (const u of f.u) byPos.set(u[3] + "," + u[4], u);
+
+  // production ghosts + rings beneath units
+  for (const u of f.u) {
+    if (u[7] !== ACT.PRODUCE || u[9] <= 0) continue;
+    const p = Math.max(0, Math.min(1, (now - u[8]) / u[9]));
+    const [cx, cy] = unitPos(u, now), d = DIRS[u[10]];
+    const gx = cx + d[0] * cell, gy = cy + d[1] * cell;
+    ctx.save(); ctx.setLineDash([cell * 0.12, cell * 0.1]); ctx.strokeStyle = COLORS[u[2]]; ctx.globalAlpha = 0.5;
+    ctx.strokeRect(gx - cell * 0.44, gy - cell * 0.44, cell * 0.88, cell * 0.88); ctx.restore();
+    drawUnit(typeNames[u[11]], u[2], gx, gy, false, 0.15 + 0.35 * p);
+  }
+
+  for (const u of f.u) {
+    const name = typeNames[u[1]], [cx, cy] = unitPos(u, now);
+    if (u[2] < 0) { drawResource(cx, cy, u[6]); continue; }
+    // attack effects
+    if (u[7] === ACT.ATTACK && u[9] > 0) {
+      const p = Math.max(0, Math.min(1, (now - u[8]) / u[9]));
+      const tx = (u[10] + 0.5) * cell, ty = (u[11] + 0.5) * cell;
+      const ranged = Math.abs(u[10] - u[3]) + Math.abs(u[11] - u[4]) > 1;
+      ctx.save(); ctx.strokeStyle = COLORS[u[2]]; ctx.shadowColor = COLORS[u[2]]; ctx.shadowBlur = cell * 0.4;
+      if (ranged) {
+        const bx = cx + (tx - cx) * p, by = cy + (ty - cy) * p;
+        ctx.lineWidth = Math.max(1.5, cell * 0.06); ctx.globalAlpha = 0.35;
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(bx, by); ctx.stroke();
+        ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bx, by, cell * 0.09, 0, Math.PI * 2); ctx.fill();
+      } else {
+        const sw = Math.sin(p * Math.PI);
+        ctx.lineWidth = Math.max(2, cell * 0.08); ctx.globalAlpha = 0.25 + 0.75 * sw; ctx.lineCap = "round";
+        const mx = cx + (tx - cx) * 0.55, my = cy + (ty - cy) * 0.55, nx = -(ty - cy) / cell, ny = (tx - cx) / cell;
+        ctx.beginPath(); ctx.moveTo(mx + nx * cell * 0.25, my + ny * cell * 0.25);
+        ctx.quadraticCurveTo(tx - (tx - cx) * 0.1, ty - (ty - cy) * 0.1, mx - nx * cell * 0.25, my - ny * cell * 0.25); ctx.stroke();
+      }
+      ctx.restore();
+    }
+    if (u[7] === ACT.HARVEST || u[7] === ACT.RETURN) {
+      const p = Math.max(0, Math.min(1, (now - u[8]) / Math.max(1, u[9])));
+      const d = DIRS[u[10]];
+      ctx.save(); ctx.globalAlpha = 0.6 * Math.sin(p * Math.PI); ctx.fillStyle = ORE;
+      ctx.beginPath(); ctx.arc(cx + d[0] * cell * 0.5, cy + d[1] * cell * 0.5, cell * 0.08 + cell * 0.06 * Math.sin(p * 12), 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    }
+    drawUnit(name, u[2], cx, cy, u[6] > 0, 1);
+    if (u[7] === ACT.PRODUCE && u[9] > 0) ring(cx, cy, cell * 0.47, Math.max(0, Math.min(1, (now - u[8]) / u[9])), COLORS[u[2]]);
+    hpBar(cx, cy, u[5], meta.unitTypes[u[1]].hp, u[2]);
+  }
+
+  // particles and floating text
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(p.x * cell, p.y * cell, p.r * cell, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.font = `700 ${Math.max(10, Math.round(cell * 0.38))}px ui-sans-serif, system-ui`; ctx.textAlign = "center";
+  for (const t of floaters) {
+    ctx.globalAlpha = Math.max(0, t.life / t.max); ctx.fillStyle = t.c;
+    ctx.fillText(t.text, t.x * cell, (t.y - 0.6 * (1 - t.life / t.max)) * cell);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ------------------------------------------------------------- effects
+function burst(x, y, color, n, speed, size) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, v = speed * (0.3 + Math.random());
+    particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, r: size * (0.5 + Math.random()), c: color, life: 0.6, max: 0.6 });
+  }
+}
+function pan(x) { return meta ? (x / Math.max(1, meta.width - 1)) * 1.6 - 0.8 : 0; }
+
+function diffEvents(prev, cur) {
+  const before = new Map(prev.u.map(u => [u[0], u]));
+  const after = new Map(cur.u.map(u => [u[0], u]));
+  for (const [id, u] of before) {
+    if (after.has(id)) continue;
+    const x = u[3] + 0.5, y = u[4] + 0.5;
+    if (u[2] < 0) { burst(x, y, ORE, 10, 1.2, 0.05); Sound.play("crumble", pan(u[3])); }
+    else { burst(x, y, COLORS[u[2]], 26, 2.6, 0.07); burst(x, y, "#ffd27a", 12, 1.6, 0.05); Sound.play("death", pan(u[3])); }
+  }
+  for (const [id, u] of after) {
+    const old = before.get(id), x = u[3] + 0.5, y = u[4] + 0.5;
+    if (!old) {
+      if (prev.u.length && u[2] >= 0) {
+        burst(x, y, COLORS[u[2]], 14, 1.4, 0.045);
+        Sound.play(typeNames[u[1]] === "Base" || typeNames[u[1]] === "Barracks" ? "build" : "spawn", pan(u[3]));
+      }
+      continue;
+    }
+    if (u[5] < old[5]) { burst(x, y, "#ffffff", 8, 1.8, 0.04); floaters.push({ x, y, text: "-" + (old[5] - u[5]), c: "#ff8a8a", life: 0.7, max: 0.7 }); Sound.play("hit", pan(u[3])); }
+    if (u[2] >= 0 && old[6] === 0 && u[6] > 0) { burst(x, y, ORE, 6, 1, 0.035); Sound.play("harvest", pan(u[3])); }
+    if (u[2] >= 0 && old[6] > 0 && u[6] === 0 && cur.r[u[2]] > prev.r[u[2]]) {
+      const base = cur.u.find(b => b[2] === u[2] && typeNames[b[1]] === "Base" && Math.abs(b[3] - u[3]) + Math.abs(b[4] - u[4]) === 1) || u;
+      floaters.push({ x: base[3] + 0.5, y: base[4] + 0.5, text: "+" + old[6], c: ORE, life: 0.9, max: 0.9 });
+      Sound.play("deposit", pan(u[3]));
+    }
+    if (u[7] === ACT.ATTACK && u[8] === cur.t - 1 && !(old[7] === ACT.ATTACK && old[8] === u[8])) {
+      const ranged = Math.abs(u[10] - u[3]) + Math.abs(u[11] - u[4]) > 1;
+      Sound.play(ranged ? "shoot" : "melee", pan(u[3]));
+    }
+  }
+  if (cur.winner !== undefined) showWinner(cur.winner);
+}
+
+function showWinner(w, silent) {
+  const b = $("banner");
+  if (w >= 0) {
+    b.innerHTML = `<span style="color:${COLORS[w]}">${meta.players[w] || "P" + w}</span> wins<small>tick ${frames[frames.length - 1].t}</small>`;
+    if (!silent) Sound.play("victory", 0);
+  } else b.innerHTML = "Draw";
+  b.style.display = "block";
+}
+
+// --------------------------------------------------------------- HUD + loop
+function updateHud(f) {
+  $("res0").textContent = f.r[0]; $("res1").textContent = f.r[1];
+  let c0 = 0, c1 = 0; for (const u of f.u) { if (u[2] === 0) c0++; else if (u[2] === 1) c1++; }
+  $("cnt0").textContent = c0; $("cnt1").textContent = c1;
+  $("tick").textContent = "t = " + f.t;
+  $("timeline").value = Math.floor(playhead);
+}
+
+function setPlaying(p) { playing = p; $("play").textContent = playing ? "⏸" : "▶"; }
+
+function frameLoop(ts) {
+  const dt = lastTs ? Math.min(0.1, (ts - lastTs) / 1000) : 0; lastTs = ts;
+  if (meta && frames.length) {
+    const end = frames.length - 1;
+    if (playing) {
+      playhead += dt * TICKS_PER_SEC * speed;
+      if (isLive) {
+        if (playhead >= end) { playhead = end; follow = true; }          // wait for the next frame
+        else if (follow && playhead < end - TICKS_PER_SEC * speed) playhead = end - TICKS_PER_SEC * speed * 0.5; // don't lag behind
+      } else if (playhead >= end) { playhead = end; setPlaying(false); }
+    }
+    playhead = Math.max(0, Math.min(playhead, end));
+    const idx = Math.floor(playhead);
+    if (idx !== lastFrameIdx) {
+      if (lastFrameIdx >= 0 && idx > lastFrameIdx && idx - lastFrameIdx <= 32) {
+        for (let k = lastFrameIdx + 1; k <= idx; k++) diffEvents(frames[k - 1], frames[k]);
+      } else if (frames[idx].winner !== undefined) showWinner(frames[idx].winner, true);
+      else $("banner").style.display = "none";
+      lastFrameIdx = idx; updateHud(frames[idx]);
+    }
+    const sub = idx < end ? playhead - idx : 0;
+    for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; p.life -= dt; }
+    for (const t of floaters) t.life -= dt;
+    for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+    for (let i = floaters.length - 1; i >= 0; i--) if (floaters[i].life <= 0) floaters.splice(i, 1);
+    draw(frames[idx].t + sub);
+  }
+  requestAnimationFrame(frameLoop);
+}
+requestAnimationFrame(frameLoop);
+
+// ---------------------------------------------------------------- controls
+$("play").onclick = () => { Sound.init(); if (!playing && !isLive && playhead >= frames.length - 1) { playhead = 0; lastFrameIdx = -1; } setPlaying(!playing); };
+$("back").onclick = () => { setPlaying(false); follow = false; playhead = Math.max(0, Math.floor(playhead) - 1); };
+$("fwd").onclick = () => { setPlaying(false); playhead = Math.min(frames.length - 1, Math.floor(playhead) + 1); };
+$("timeline").oninput = e => { follow = +e.target.value >= frames.length - 1; playhead = +e.target.value; lastFrameIdx = -1; };
+$("speed").onchange = e => { speed = +e.target.value; };
+$("sound").onclick = () => Sound.toggle();
+$("volume").oninput = e => Sound.setVolume(+e.target.value);
+window.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.code === "Space") { e.preventDefault(); $("play").click(); }
+  else if (e.code === "ArrowLeft") $("back").click();
+  else if (e.code === "ArrowRight") $("fwd").click();
+  else if (e.key === "m") Sound.toggle();
+  else if (e.key === "+" || e.key === "=") { const s = $("speed"); s.selectedIndex = Math.min(s.options.length - 1, s.selectedIndex + 1); s.onchange({ target: s }); }
+  else if (e.key === "-") { const s = $("speed"); s.selectedIndex = Math.max(0, s.selectedIndex - 1); s.onchange({ target: s }); }
+});
+
+// tooltip
+const ACT_NAMES = ["wait", "move", "harvest", "return", "produce", "attack"];
+canvas.addEventListener("mousemove", e => {
+  const tip = $("tip"), f = frames[Math.floor(playhead)];
+  if (!f) return;
+  const r = canvas.getBoundingClientRect(), x = Math.floor((e.clientX - r.left) / cell), y = Math.floor((e.clientY - r.top) / cell);
+  const u = f.u.find(u => u[3] === x && u[4] === y);
+  if (!u) { tip.style.display = "none"; return; }
+  const who = u[2] < 0 ? "neutral" : (meta.players[u[2]] || "P" + u[2]);
+  let txt = `<b>${typeNames[u[1]]}</b> · ${who}<br>`;
+  txt += u[2] < 0 ? `ore left ${u[6]}` : `hp ${u[5]}/${meta.unitTypes[u[1]].hp}${u[6] ? " · carrying " + u[6] : ""}`;
+  if (u[7] > 0) txt += `<br>${ACT_NAMES[u[7]]}${u[7] === ACT.PRODUCE ? " " + typeNames[u[11]] : ""} (${Math.max(0, u[8] + u[9] - f.t)} ticks left)`;
+  tip.innerHTML = txt; tip.style.display = "block"; tip.style.left = e.clientX + 14 + "px"; tip.style.top = e.clientY + 14 + "px";
+});
+canvas.addEventListener("mouseleave", () => { $("tip").style.display = "none"; });
+
+function buildLegend() {
+  const L = $("legend"); L.innerHTML = "";
+  for (const name of ["Base", "Barracks", "Worker", "Light", "Heavy", "Ranged"]) {
+    if (!typeNames.includes(name)) continue;
+    const c = document.createElement("canvas"), size = 22, k = window.devicePixelRatio || 1;
+    c.width = size * k; c.height = size * k; c.style.width = size + "px"; c.style.height = size + "px";
+    const cctx = c.getContext("2d"); cctx.setTransform(k, 0, 0, k, 0, 0);
+    const orig = [ctx, cell];
+    ctx = cctx; cell = size;                       // reuse the board drawing code
+    try { drawUnit(name, 0, size / 2, size / 2, false, 1); } finally { [ctx, cell] = orig; }
+    const s = document.createElement("span"); s.append(c, " " + name); L.append(s);
+  }
+}
+</script>
+</body>
+</html>
