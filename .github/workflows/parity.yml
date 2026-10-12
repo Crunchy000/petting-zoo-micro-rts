@@ -1,0 +1,44 @@
+name: parity
+
+# Plays random games through this engine and the reference Java MicroRTS
+# engine side by side and fails on the first differing observation, mask,
+# reward, resource count or game-over flag. It takes several minutes, so it
+# only runs when the game rules or maps change (or on demand).
+on:
+  push:
+    paths:
+      - "microrts_pz/engine.py"
+      - "microrts_pz/game.py"
+      - "microrts_pz/unit_types.py"
+      - "microrts_pz/maps/**"
+      - "tools/parity/**"
+      - ".github/workflows/parity.yml"
+  pull_request:
+    paths:
+      - "microrts_pz/engine.py"
+      - "microrts_pz/game.py"
+      - "microrts_pz/unit_types.py"
+      - "microrts_pz/maps/**"
+      - "tools/parity/**"
+      - ".github/workflows/parity.yml"
+  workflow_dispatch:
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Farama-Foundation/MicroRTS
+          ref: 72f2fd94039adf3323f4591947e98661a572f927
+          path: MicroRTS
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - run: python tools/parity/check_parity.py --microrts MicroRTS --episodes 1 --steps 1000

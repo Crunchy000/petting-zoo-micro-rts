@@ -136,7 +136,7 @@ and scrub back while the game keeps running. Set `MICRORTS_NO_BROWSER=1` to
 skip opening a browser, and pass `viewer_port=` to pick the port.
 
 ```bash
-python examples/replay_bots.py --out replay.html    # worker rush vs. light rush, saved
+python examples/replay_bots.py --out replay.html    # mixed armies, every unit type, saved
 python examples/replay_bots.py --live               # the same game, live
 ```
 
@@ -152,7 +152,8 @@ text board.
 ## Bots
 
 `microrts_pz.bots` has `RandomBot` (random valid actions) and `WorkerRushBot`,
-which can also build barracks and rush with Light, Heavy or Ranged units.
+which can also build barracks and rush with Light, Heavy or Ranged units
+(or cycle through several, e.g. `army=("Light", "Heavy", "Ranged")`).
 These are sparring partners for testing. They read the engine state
 directly and are not tuned AIs.
 
@@ -178,9 +179,9 @@ python tools/parity/check_parity.py --microrts /tmp/MicroRTS --episodes 2 --step
 ```
 
 The default sweep (7 maps, unit-table versions 1 and 2, full and partial
-observability) matches the Java engine on every tick. CI runs it on each
-push. The port keeps the Java engine's quirks so trajectories match, for
-example:
+observability) matches the Java engine on every tick. CI runs it whenever
+the engine, unit table or maps change. The port keeps the Java engine's
+quirks so trajectories match, for example:
 
 - Player 0's actions are issued first, so a player 1 move into a cell that
   player 0 just claimed is dropped.

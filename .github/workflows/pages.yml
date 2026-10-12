@@ -30,8 +30,8 @@ jobs:
         run: |
           mkdir -p _site
           cp docs/site/index.html _site/
-          python examples/replay_bots.py --opponent light --seed 0 --out _site/replay.html
-          python examples/replay_bots.py --opponent random --seed 1 --out _site/replay-random.html
+          python examples/replay_bots.py --opponent mixed --seed 0 --out _site/replay.html
+          python examples/replay_bots.py --opponent mixed --map maps/letMeOut.xml --seed 0 --out _site/replay-2.html
           touch _site/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
