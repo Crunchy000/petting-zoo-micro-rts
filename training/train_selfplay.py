@@ -190,6 +190,126 @@ class VecGames:
             p.join(timeout=5)
 
 
+class FastGames:
+    """``VecGames`` on the compiled batch engine (``microrts_pz.fast``): one process, all cores."""
+
+    #: (kind, harvesters, army) for each name in ``BOTS``.
+    SPECS = {
+        "random": ("random", 1, None),
+        "rush": ("rush", 1, None),
+        "rush2": ("rush", 2, None),
+        "light": ("rush", 2, "Light"),
+        "heavy": ("rush", 2, "Heavy"),
+        "ranged": ("rush", 2, "Ranged"),
+        "mixed": ("rush", 2, ("Light", "Ranged", "Heavy")),
+    }
+
+    def __init__(self, num_envs, maps, env_kwargs, seed, opp_weights, teach):
+        from microrts_pz.env import DEFAULT_REWARD_WEIGHT
+        from microrts_pz.fast import BatchGame
+
+        self.procs = []
+        self.N = num_envs
+        self.rng = np.random.default_rng(seed)
+        self.games = BatchGame(maps, num_games=num_envs, max_steps=env_kwargs.get("max_steps", 2000),
+                               map_index=self.rng.integers(len(maps), size=num_envs))
+        self.games.reset(seed=seed)
+        self.weight = np.asarray(DEFAULT_REWARD_WEIGHT)
+        self.opp_weights = opp_weights
+        self.teach = teach
+        self.n_snapshots = 0
+        self.opp = [""] * num_envs
+        self.snapshot = np.full(num_envs, -1)
+        self.side = np.zeros(num_envs, dtype=np.int64)
+        self.teacher = [None] * num_envs
+        self.ret = np.zeros(num_envs)
+        self.length = np.zeros(num_envs, dtype=np.int64)
+
+    def _new_episode(self, i):
+        names = [n for n in self.opp_weights if n != "self" or self.n_snapshots > 0]
+        w = np.array([self.opp_weights[n] for n in names])
+        self.opp[i] = names[self.rng.choice(len(names), p=w / w.sum())] if names else "mixed"
+        self.snapshot[i] = int(self.rng.integers(self.n_snapshots)) if self.opp[i] == "self" else -1
+        self.teacher[i] = TEACHERS[self.rng.integers(len(TEACHERS))] if self.teach else None
+        self.side[i] = self.rng.integers(2)
+        self.ret[i] = 0.0
+        self.length[i] = 0
+
+    def _pack(self):
+        g = self.games
+        o0, m0 = g.observe(0)
+        o1, m1 = g.observe(1)
+        self._masks = (m0, m1)
+        obs, mask = (o0, o1), (m0, m1)
+        out = []
+        for i in range(self.N):
+            me, opp = self.side[i], 1 - self.side[i]
+            selfplay = self.opp[i] == "self"
+            out.append((obs[me][i], mask[me][i].reshape(-1), obs[opp][i] if selfplay else None,
+                        mask[opp][i].reshape(-1) if selfplay else None, self.snapshot[i]))
+        return out
+
+    def broadcast(self, cmd, data=None):
+        if cmd == "snapshots":
+            self.n_snapshots = data
+        elif cmd == "teach":
+            self.teach = bool(data)
+            for i in range(self.N):
+                self.teacher[i] = TEACHERS[self.rng.integers(len(TEACHERS))] if self.teach else None
+
+    def reset(self, n_snapshots):
+        self.n_snapshots = n_snapshots
+        self.games.reset()
+        for i in range(self.N):
+            self._new_episode(i)
+        return self._pack()
+
+    def _scripted(self, player, names):
+        kinds, harv, army = [], [], []
+        for n in names:
+            k, h, a = self.SPECS[n] if n else ("none", 1, None)
+            kinds.append(k)
+            harv.append(h)
+            army.append(a)
+        return self.games.bot_actions(player, kinds, harv, army, masks=self._masks[player])
+
+    def step(self, learner_actions, opp_actions):
+        N, g = self.N, self.games
+        cells = g.num_cells
+        # who plays each side: the learner (or its teacher), a snapshot, or a bot
+        scripted = [[None] * N, [None] * N]
+        for i in range(N):
+            me, opp = self.side[i], 1 - self.side[i]
+            if self.teacher[i] is not None:
+                scripted[me][i] = self.teacher[i]
+            if self.opp[i] != "self":
+                scripted[opp][i] = self.opp[i]
+        acts = [self._scripted(0, scripted[0]), self._scripted(1, scripted[1])]
+        taught = [acts[self.side[i]][i].copy() if self.teacher[i] is not None else None for i in range(N)]
+        for i in range(N):
+            me, opp = self.side[i], 1 - self.side[i]
+            if self.teacher[i] is None:
+                acts[me][i] = np.asarray(learner_actions[i]).reshape(cells, -1)
+            if self.opp[i] == "self":
+                acts[opp][i] = np.asarray(opp_actions[i]).reshape(cells, -1)
+        raw, over, trunc, winner = g.step(acts[0], acts[1])
+        rew = raw @ self.weight  # (N, 2)
+        done = over | trunc
+        episodes = [None] * N
+        r = rew[np.arange(N), self.side]
+        self.ret += r
+        self.length += 1
+        for i in np.flatnonzero(done):
+            result = 0 if winner[i] < 0 else (1 if winner[i] == self.side[i] else -1)
+            episodes[i] = (self.opp[i], result, self.ret[i], self.length[i])
+            self._new_episode(i)
+        state = self._pack()
+        return [(*state[i], r[i], bool(done[i]), episodes[i], taught[i]) for i in range(N)]
+
+    def close(self):
+        pass
+
+
 # ------------------------------------------------------------------- main
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -198,6 +318,8 @@ def main(argv=None):
     ap.add_argument("--total-steps", type=int, default=2_000_000, help="environment steps (summed over envs)")
     ap.add_argument("--time-limit", type=float, default=0, help="stop after this many minutes (0 = no limit)")
     ap.add_argument("--num-envs", type=int, default=24)
+    ap.add_argument("--engine", choices=("fast", "python"), default=None,
+                    help="fast: the compiled batch engine (needs numba, the default when installed); python: worker processes")
     ap.add_argument("--num-workers", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--num-steps", type=int, default=256, help="rollout length per env per update")
     ap.add_argument("--max-steps", type=int, default=2000, help="episode length cap in ticks")
@@ -224,6 +346,10 @@ def main(argv=None):
                     help="learn from one rollout while playing the next (default: on with a GPU)")
     ap.add_argument("--no-amp", action="store_true", help="train in float32 on the GPU (mixed precision is ~10x faster on a T4)")
     args = ap.parse_args(argv)
+    if args.engine is None:
+        import importlib.util
+
+        args.engine = "fast" if importlib.util.find_spec("numba") else "python"
 
     maps = args.map or ["maps/16x16/basesWorkers16x16.xml"]
     os.makedirs(args.out, exist_ok=True)
@@ -240,7 +366,10 @@ def main(argv=None):
     cells, mask_w = H * W, int(sum(ACTION_DIMS))
 
     # Workers fork before CUDA is initialised.
-    vec = VecGames(args.num_envs, args.num_workers, maps, env_kwargs, args.seed, opp_weights, teach=args.bc_steps > 0)
+    if args.engine == "fast":
+        vec = FastGames(args.num_envs, maps, env_kwargs, args.seed, opp_weights, teach=args.bc_steps > 0)
+    else:
+        vec = VecGames(args.num_envs, args.num_workers, maps, env_kwargs, args.seed, opp_weights, teach=args.bc_steps > 0)
     device = torch.device(args.device)
     amp = device.type == "cuda" and not args.no_amp
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
@@ -268,7 +397,7 @@ def main(argv=None):
     if args.resume and os.path.exists(latest) and "optimizer" in ckpt:
         opt.load_state_dict(ckpt["optimizer"])
     print(f"map {H}x{W}, {sum(p.numel() for p in model.parameters()):,} parameters, device {device}, "
-          f"{args.num_envs} envs on {len(vec.procs)} workers")
+          f"{args.num_envs} envs, {args.engine} engine" + (f" on {len(vec.procs)} workers" if vec.procs else ""))
 
     snapshot_models = [load_policy(p, device) for p in snapshots[-args.keep_snapshots:]]
 
