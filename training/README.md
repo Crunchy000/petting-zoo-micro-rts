@@ -111,11 +111,25 @@ per unit.
 
 ### Choosing sizes
 
-`--num-envs` is the main lever: more games make larger batches and use the GPU
-better. 1,024 (the default) suits a 16 GB or 24 GB GPU on 16×16 maps; on 8×8
-maps you can go higher. Keep `num-envs × num-steps` a multiple of
-`--minibatch-size`. If you run out of GPU memory, lower `--minibatch-size`
-first (it sets the activation memory of the update), then `--num-envs`.
+Measured on one NVIDIA L4 (24 GB, 12 CPU cores), the default trainer on
+16×16 maps plays and learns from about **14,800 environment steps a second**,
+3.3× the PyTorch trainer on the same machine. The update takes about
+four fifths of that time, so the options that change the network's work matter
+most, and the batch shape hardly matters. [Speed of each option](#speed-of-each-option)
+has the numbers. In short:
+
+* `--epochs` and `--width` are the real speed levers. `--epochs 1` or
+  `--width 32` are each about 1.6× faster, and `--epochs 4` or `--width 128`
+  about half the speed. Whether a faster setting also learns as well per step is
+  a separate question that these numbers don't answer.
+* `--num-envs` (256 to 4,096) and `--num-steps` (32 to 128) change throughput
+  by under 5%. They set the batch size, the memory use and how often the
+  weights change, so choose them for learning, not speed.
+* Keep `--dtype bfloat16` on a GPU. `float32` runs at 0.41× the speed.
+* Smaller maps are much faster: 8×8 runs about 4× faster than 16×16.
+* Keep `num-envs × num-steps` a multiple of `--minibatch-size`. The update's
+  memory grows with `--minibatch-size`, about 0.8 GB per 1,024 samples on
+  16×16 maps, so lower it first if you run out of GPU memory.
 
 ## Checkpoints
 
@@ -219,8 +233,9 @@ draws differ from the Python bot's.
 games on the Numba engine (`microrts_pz.fast`, all CPU cores) or the Python
 environment in worker processes. It trains the same network with the same
 recipe and writes `.pt` checkpoints. Use it if you can't install JAX. On a
-GPU it is several times slower, because the games run on the CPU and every
-step crosses to the GPU and back.
+GPU it is slower (about 4,500 steps/s against 14,800 on an L4, see
+[Speed](#speed)), because the games run on the CPU and every step crosses to
+the GPU and back.
 
 ```bash
 pip install -e ".[train]"        # torch + numba
@@ -229,9 +244,66 @@ python training/train_selfplay.py --map maps/16x16/basesWorkers16x16.xml --bc-st
 
 ## Speed
 
-`tools/bench/engines.py` times the engines on their own, the self-play
-rollout with the network, and the PPO update. On an NVIDIA L4 (16×16 map, 1,024
-games):
+### The whole trainer
+
+`tools/bench/trainer.py` runs `train_jax.py` for a few updates per
+configuration, each changing one option from the defaults: 16×16 map, 1,024
+games × 64 steps, minibatches of 4,096, 2 epochs, bfloat16, width 64, and the
+default opponent pool. It reports steps per second between updates once
+compiling is done. That includes the rollout, the update and saving
+checkpoints.
+
+```bash
+python tools/bench/trainer.py --pytorch       # the whole sweep, plus the PyTorch trainer
+python tools/bench/trainer.py --only base,epochs=1,width=32
+```
+
+### Speed of each option
+
+On an NVIDIA L4 (22.5 GB usable) with 12 CPU cores:
+
+| option | steps/s | vs default | rollout s | update s | peak GPU memory |
+|---|---:|---:|---:|---:|---:|
+| defaults | 14,794 | 1.00× | 0.92 | 3.48 | 4.4 GB |
+| `--num-envs 256` | 14,309 | 0.97× | 0.23 | 0.88 | 3.7 GB |
+| `--num-envs 512` | 14,551 | 0.98× | 0.43 | 1.78 | 4.0 GB |
+| `--num-envs 2048` | 14,231 | 0.96× | 2.07 | 7.13 | 5.1 GB |
+| `--num-envs 4096` | 14,107 | 0.95× | 4.36 | 14.21 | 6.7 GB |
+| `--num-steps 32` | 14,223 | 0.96× | 0.47 | 1.80 | 4.0 GB |
+| `--num-steps 128` | 14,514 | 0.98× | 1.91 | 7.10 | 5.1 GB |
+| `--minibatch-size 2048` | 14,498 | 0.98× | 0.95 | 3.54 | 2.6 GB |
+| `--minibatch-size 8192` | 14,126 | 0.95× | 0.96 | 3.64 | 7.7 GB |
+| `--minibatch-size 16384` | out of memory | | | | |
+| `--epochs 1` | 23,648 | 1.60× | 0.95 | 1.78 | 4.4 GB |
+| `--epochs 4` | 8,103 | 0.55× | 0.95 | 7.11 | 4.4 GB |
+| `--dtype float32` | 5,999 | 0.41× | 1.91 | 8.99 | 7.4 GB |
+| `--width 32` | 23,872 | 1.61× | 0.64 | 2.08 | 3.1 GB |
+| `--width 128` | 6,746 | 0.46× | 1.81 | 7.82 | 7.0 GB |
+| `--opponents self:1` (all self-play) | 13,021 | 0.88× | 1.41 | 3.58 | 4.4 GB |
+| `--opponents` without `self` (bots only) | 14,801 | 1.00× | 0.81 | 3.58 | 4.4 GB |
+| `--keep-snapshots 8` | 14,303 | 0.97× | 0.95 | 3.59 | 4.4 GB |
+| behaviour cloning phase (`--bc-steps`) | 12,723 | 0.86× | 0.89 | 4.22 | 4.6 GB |
+| 8×8 map | 58,683 | 3.97× | 0.21 | 0.87 | 1.2 GB |
+| 24×24 map, with `XLA_PYTHON_CLIENT_MEM_FRACTION=0.95` | 6,284 | 0.42× | 2.29 | 8.11 | 9.4 GB |
+| 24×24 map, `--minibatch-size 2048` | 6,305 | 0.43× | 2.29 | 8.05 | 5.8 GB |
+| PyTorch trainer (`train_selfplay.py`, Numba engine, 512 games × 128 steps, 4 epochs, AMP) | 4,451 | 0.30× | | | |
+
+The rollout and update columns are seconds per update. The first update also
+compiles, which takes 30 to 85 seconds depending on the configuration.
+
+`--minibatch-size 16384` needs more than the L4's memory: it tries to
+allocate a single 13.4 GB buffer. On 24×24 maps, the default minibatch of
+4,096 failed with JAX's default memory settings. It ran with
+`XLA_PYTHON_CLIENT_MEM_FRACTION=0.95`, which lets JAX use 95% of the GPU
+instead of the default 75%, or with `--minibatch-size 2048`. Both run at the
+same speed.
+Compared at the same 4 epochs, the JAX trainer (8,103 steps/s) is still 1.8×
+the PyTorch one.
+
+### The parts on their own
+
+`tools/bench/engines.py` times the engines alone, the self-play rollout with
+the network, and the PPO update. On the same L4 (16×16 map, 1,024 games):
 
 | | Numba engine + PyTorch | JAX |
 |---|---|---|

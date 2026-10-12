@@ -217,7 +217,9 @@ engine, bots and network in your own training code.
 The main trainer, `train_jax.py`, runs everything in JAX on the GPU: the
 games, the scripted bots, the self-play opponents and the network. The
 earlier PyTorch trainer (`train_selfplay.py`, on the Numba engine) still
-works without JAX. Both write checkpoints that play in the PettingZoo
+works without JAX. On one Colab L4 the JAX trainer runs about 14,800
+environment steps a second on 16×16 maps, 3.3× the PyTorch one; the guide has
+the speed of every option. Both write checkpoints that play in the PettingZoo
 environment, and [`train_colab.ipynb`](training/train_colab.ipynb) runs the
 whole recipe on a Colab GPU.
 
