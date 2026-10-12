@@ -154,7 +154,9 @@ def ppo_loss_and_stats(params, batch, action_dims, dtype=jnp.float32, clip=0.1, 
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
     pg = jnp.maximum(-adv * ratio, -adv * jnp.clip(ratio, 1 - clip, 1 + clip)).mean()
     v = 0.5 * ((value - batch["ret"]) ** 2).mean()
-    return pg - ent_coef * ent.mean() + vf_coef * v, {"pg_loss": pg, "v_loss": v, "entropy": ent.mean()}
+    stats = {"pg_loss": pg, "v_loss": v, "entropy": ent.mean(),
+             "approx_kl": ((ratio - 1) - jnp.log(ratio)).mean(), "clipfrac": (jnp.abs(ratio - 1) > clip).mean()}
+    return pg - ent_coef * ent.mean() + vf_coef * v, stats
 
 
 def bc_loss_and_stats(params, batch, action_dims, dtype=jnp.float32, vf_coef=0.5, dilations=DEFAULT_DILATIONS):

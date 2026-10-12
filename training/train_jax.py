@@ -58,6 +58,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opponents import BOT_SPECS, TEACHERS, parse_weights  # noqa: E402
 
 
+#: Training statistics written to ``metrics.csv`` (averaged over an update's minibatches).
+STAT_COLUMNS = ("pg_loss", "v_loss", "entropy", "bc_loss", "approx_kl", "clipfrac")
+
+
 def slot_layout(num_envs: int, weights: dict[str, float], keep_snapshots: int):
     """Opponent name for every game slot: self-play first (a multiple of ``keep_snapshots``), then each bot in a block."""
     total = sum(weights.values())
@@ -293,8 +297,8 @@ def main(argv=None):
     metrics = open(metrics_path, "w" if new_file else "a", newline="")
     writer = csv.writer(metrics)
     if new_file:
-        writer.writerow(["step", "phase", "sps", "episodes", "mean_return", "win_rate", "per_opponent",
-                         "pg_loss", "v_loss", "entropy", "bc_loss"])
+        writer.writerow(["step", "phase", "sps", "episodes", "mean_return", "win_rate", "per_opponent", *STAT_COLUMNS,
+                         "rollout_s", "update_s", "peak_mem_gb"])
     has_torch = importlib.util.find_spec("torch") is not None  # only needed to export latest.pt
 
     def save(step, update):
@@ -346,8 +350,9 @@ def main(argv=None):
         phase = "bc" if teaching else "ppo"
         print(f"[{phase}] step {global_step:>11,}  sps {sps:>6}  return {mean_ret:7.2f}  score {score:+.2f}  "
               f"rollout {t_roll:.1f}s update {t_upd:.1f}s  wins {per_opp}", flush=True)
+        mem = (jax.devices()[0].memory_stats() or {}).get("peak_bytes_in_use", float("nan")) / 2**30
         writer.writerow([global_step, phase, sps, int(ep["episodes"].sum()), mean_ret, score, per_opp,
-                         *(stats.get(k, float("nan")) for k in ("pg_loss", "v_loss", "entropy", "bc_loss"))])
+                         *(stats.get(k, float("nan")) for k in STAT_COLUMNS), round(t_roll, 4), round(t_upd, 4), round(mem, 3)])
         metrics.flush()
         if not teaching and update % args.snapshot_every == 0:
             snapshots = snap_fn(snapshots, params, n_snapped % K)
