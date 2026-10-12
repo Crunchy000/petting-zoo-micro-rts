@@ -3,7 +3,8 @@
 """Cut ``sprite_sheet.jpg`` and ``spider_drones.jpg`` into transparent PNGs in ``microrts_pz/render/sprites``.
 
 The main sheet is a grid (5 columns x 4 rows) on a flat dark background; the
-Light unit comes from the drill column of ``spider_drones.jpg``. Each cell is cropped, the
+Light unit comes from the drill column of ``spider_drones.jpg`` and the Ranged
+tank's four facings from ``tank_directions.jpg``. Each cell is cropped, the
 background connected to the cell border is keyed out (with a soft, colour
 corrected edge) and the sprite is trimmed and scaled to at most 112 px.
 Run ``embed.py`` afterwards to inline the result into the viewer.
@@ -23,12 +24,17 @@ YS = [27, 163, 299, 436, 570]
 BG = np.array([34.0, 39.0, 45.0])
 CELLS = {
     (0, 0): "Base_0", (0, 1): "Barracks_0", (0, 2): "Worker_0", (0, 3): "Resource", (0, 4): "Resource_small",
-    (1, 1): "Ranged_0", (1, 2): "Heavy_0",
+    (1, 2): "Heavy_0",
     (2, 0): "Base_1", (2, 1): "Barracks_1", (2, 2): "Worker_1",
-    (3, 1): "Ranged_1", (3, 2): "Heavy_1",
+    (3, 2): "Heavy_1",
 }
 #: spider_drones.jpg: name -> (top, bottom, left, right) of the drill drone, below the column title
 DRONES = {"Light_0": (100, 316, 546, 1018), "Light_1": (328, 568, 546, 1018)}
+#: tank_directions.jpg: a 4 x 2 grid of the Ranged tank seen from each side, one row per player.
+#: The column headers have west and east swapped; these names follow where the barrel points.
+TANK_XS = [37, 282, 527, 772, 1016]
+TANK_YS = [105, 336, 566]
+TANK_COLS = ["N", "E", "S", "W"]
 
 
 def cut(cell: np.ndarray, shadow: bool = False) -> Image.Image:
@@ -60,6 +66,11 @@ def main() -> None:
     drones = np.array(Image.open(os.path.join(HERE, "spider_drones.jpg")).convert("RGB")).astype(float)
     for name, (t, b, l, r) in DRONES.items():
         cut(drones[t:b, l:r], shadow=True).save(os.path.join(OUT, name + ".png"), optimize=True)
+    tanks = np.array(Image.open(os.path.join(HERE, "tank_directions.jpg")).convert("RGB")).astype(float)
+    for r in range(2):
+        for c, facing in enumerate(TANK_COLS):
+            cell = tanks[TANK_YS[r] + 8 : TANK_YS[r + 1] - 8, TANK_XS[c] + 8 : TANK_XS[c + 1] - 8]
+            cut(cell, shadow=True).save(os.path.join(OUT, f"Ranged_{r}_{facing}.png"), optimize=True)
 
 
 if __name__ == "__main__":
