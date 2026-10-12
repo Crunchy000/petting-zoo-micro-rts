@@ -346,7 +346,7 @@ def main(argv=None):
                     help="weighted opponent pool, e.g. 'mixed:2,random:1,self:3' (self = past snapshots)")
     ap.add_argument("--bc-steps", type=int, default=0, help="behaviour-cloning warm start: env steps imitating the bots")
     ap.add_argument("--snapshot-every", type=int, default=20, help="updates between self-play snapshots")
-    ap.add_argument("--keep-snapshots", type=int, default=10, help="most recent snapshots used as opponents")
+    ap.add_argument("--keep-snapshots", type=int, default=5, help="most recent snapshots used as opponents")
     ap.add_argument("--init", help="start from this checkpoint (e.g. one trained on a smaller map)")
     ap.add_argument("--resume", action="store_true", help="continue from --out/latest.pt")
     ap.add_argument("--width", type=int, default=64, help="network channels")

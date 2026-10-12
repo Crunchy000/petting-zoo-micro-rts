@@ -80,31 +80,47 @@ def masked_policy(
     ``(B, cells, 7)`` long to score, or ``None`` to sample.
 
     Returns ``(action, logprob (B,), entropy (B,), relevant (B, cells, 7) bool)``.
+
+    Only cells holding an idle unit of the player (a "source" cell) are
+    evaluated; usually that is a few percent of the board, so this is much
+    cheaper than scoring every cell. Other cells get action 0, which the
+    environment ignores.
     """
-    dims = list(F.pad(torch.tensor(ACTION_DIMS), (1, 0)).cumsum(0).tolist())
+    B, cells, _ = logits.shape
     source = mask[..., : ACTION_DIMS[0]].any(-1)
+    b_idx, c_idx = source.nonzero(as_tuple=True)
+    lg_src = logits[b_idx, c_idx]
+    m_src = mask[b_idx, c_idx]
+    given = action[b_idx, c_idx] if action is not None else None
+    dims = list(F.pad(torch.tensor(ACTION_DIMS), (1, 0)).cumsum(0).tolist())
     picks, logps, ents = [], [], []
     for k in range(len(ACTION_DIMS)):
-        lg = logits[..., dims[k] : dims[k + 1]]
-        m = mask[..., dims[k] : dims[k + 1]]
+        lg = lg_src[:, dims[k] : dims[k + 1]]
+        m = m_src[:, dims[k] : dims[k + 1]]
         lg = torch.where(m, lg, torch.full_like(lg, NEG))
         logp = torch.log_softmax(lg, dim=-1)
-        if action is None:
-            a = lg.argmax(-1) if deterministic else torch.distributions.Categorical(logits=lg).sample()
+        if given is None:
+            a = lg.argmax(-1) if deterministic else torch.multinomial(logp.exp(), 1).squeeze(-1) if lg.shape[0] else lg.argmax(-1)
         else:
-            a = action[..., k]
+            a = given[:, k]
         picks.append(a)
         logps.append(logp.gather(-1, a.unsqueeze(-1)).squeeze(-1))
         p = logp.exp()
         ents.append(-(torch.where(m, p * logp, torch.zeros_like(p))).sum(-1))
-    act = torch.stack(picks, -1)
-    relevant = torch.zeros_like(act, dtype=torch.bool)
-    relevant[..., 0] = source
+    act_src = torch.stack(picks, -1)
+    rel_src = torch.ones_like(act_src, dtype=torch.bool)
     for k in range(1, len(ACTION_DIMS)):
-        relevant[..., k] = source & (act[..., 0] == COMPONENT_TYPE[k])
-    rel = relevant.float()
-    logprob = (torch.stack(logps, -1) * rel).sum(dim=(1, 2))
-    entropy = (torch.stack(ents, -1) * rel).sum(dim=(1, 2))
+        rel_src[:, k] = act_src[:, 0] == COMPONENT_TYPE[k]
+    relf = rel_src.to(logits.dtype)
+    logprob = logits.new_zeros(B).index_add(0, b_idx, (torch.stack(logps, -1) * relf).sum(-1))
+    entropy = logits.new_zeros(B).index_add(0, b_idx, (torch.stack(ents, -1) * relf).sum(-1))
+    if action is None:
+        act = torch.zeros((B, cells, len(ACTION_DIMS)), dtype=torch.long, device=logits.device)
+        act[b_idx, c_idx] = act_src
+    else:
+        act = action
+    relevant = torch.zeros((B, cells, len(ACTION_DIMS)), dtype=torch.bool, device=logits.device)
+    relevant[b_idx, c_idx] = rel_src
     return act, logprob, entropy, relevant
 
 
