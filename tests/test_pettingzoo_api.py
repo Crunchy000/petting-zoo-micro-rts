@@ -90,3 +90,40 @@ def test_missing_actions_are_noops_and_episode_ends():
     assert env.agents == []
     with pytest.raises(RuntimeError):
         env.step({})
+
+
+@pytest.mark.parametrize(
+    "map_path,version,bots",
+    [
+        ("maps/16x16/basesWorkers16x16.xml", 1, "rush"),
+        ("maps/8x8/basesWorkers8x8A.xml", 1, "random"),
+        ("maps/8x8/melee8x8Mixed6.xml", 3, "random"),
+    ],
+)
+def test_fast_forward_matches_tick_by_tick(map_path, version, bots):
+    """Skipped ticks are exactly the ticks a plain env runs with all-wait actions."""
+    from microrts_pz.bots import RandomBot, WorkerRushBot
+
+    kwargs = dict(map_path=map_path, max_steps=1500, unit_type_table_version=version)
+    ff = microrts_v0.parallel_env(fast_forward=True, **kwargs)
+    plain = microrts_v0.parallel_env(**kwargs)
+    ff.reset(seed=7)
+    plain.reset(seed=7)
+    players = [WorkerRushBot(), WorkerRushBot(army="Light")] if bots == "rush" else [RandomBot(1), RandomBot(2)]
+    skipped = 0
+    while ff.agents:
+        actions = {a: players[i].act(ff.game, i).reshape(-1) for i, a in enumerate(ff.possible_agents)}
+        _, rew, term, trunc, info = ff.step(actions)
+        ticks = info["player_0"]["ticks"]
+        skipped += ticks - 1
+        total = {a: 0.0 for a in plain.possible_agents}
+        for t in range(ticks):
+            _, r, pterm, ptrunc, _ = plain.step(actions if t == 0 else {})
+            for a in r:
+                total[a] += r[a]
+        assert total == pytest.approx(rew)
+        assert pterm == term and ptrunc == trunc
+        assert ff.game.gs.to_dict() == plain.game.gs.to_dict()
+    if bots == "rush":  # random players leave units waiting, so every tick needs a decision
+        assert skipped > 0
+    assert plain.agents == []
