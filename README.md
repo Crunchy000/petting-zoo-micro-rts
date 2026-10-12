@@ -195,6 +195,22 @@ still appear and the actions issued that tick are missing). This port
 observes the state after the tick. The parity harness compares against a
 fresh Java snapshot for that reason.
 
+## Training agents
+
+`training/` has a PPO trainer with invalid-action masking and self-play
+(`train_selfplay.py`), an evaluator that records HTML replays (`play.py`) and
+a Colab notebook. A trained 16×16 agent ships in `training/agents/agent_16x16.pt`.
+It had about 16M steps, roughly three hours on one Colab L4. It wins about 60%
+of games against the mixed-army bot, 75% against Ranged and 100% against Heavy,
+but loses most games to the Light rush. The sample games on the website come
+from it.
+
+```bash
+pip install -e ".[train]"        # torch + numba
+python training/train_selfplay.py --map maps/16x16/basesWorkers16x16.xml --bc-steps 2000000 --out runs/16x16
+python training/play.py training/agents/agent_16x16.pt --opponent mixed --games 10 --record replays/
+```
+
 ### Fast batched engine
 
 For training there is a compiled batch engine, `microrts_pz.fast.BatchGame`
