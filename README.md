@@ -115,8 +115,19 @@ pure win/loss.
 | `partial_obs` | `False` | fog of war |
 | `unit_type_table_version` | `1` | 1 original, 2 fine-tuned, 3 random damage |
 | `move_conflict_resolution` | `1` | 1 cancel both, 2 cancel one at random, 3 alternate |
+| `fast_forward` | `False` | let one `step` run through ticks where no unit is idle (see below) |
 | `render_mode` | `None` | `"human"`, `"rgb_array"` or `"ansi"` |
 | `record_replay` | `False` | keep frames for `env.save_replay(path)` |
+
+**Fast-forward.** Units are busy for several ticks per action, so on many
+ticks neither player has an idle unit and no action could change anything.
+With `fast_forward=True`, `step` keeps running ticks until a unit of either
+player is idle again (or the episode ends). The game is the same tick for
+tick, so parity with the Java engine is unaffected; you just make fewer policy
+calls. `step` returns rewards summed over those ticks, `infos[agent]["ticks"]`
+says how many ticks it ran, and `max_steps` still counts ticks. Any unit that
+waits is idle again on the next tick, so policies that leave units waiting
+gain little.
 
 ## Viewer
 

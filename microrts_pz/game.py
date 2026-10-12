@@ -84,12 +84,9 @@ class MicroRTSGame:
             gs.issue_safe(pairs)
             trace.extend(pairs)
         gameover = gs.cycle()
-        rewards = np.zeros((2, len(REWARD_NAMES)), dtype=np.float64)
-        winner = gs.winner() if gameover else None
+        rewards = self._win_loss(gameover)
         for player in (0, 1):
             r = rewards[player]
-            if gameover:
-                r[0] = 1.0 if winner == player else -1.0
             for u, ua in trace:
                 if u.player != player:
                     continue
@@ -111,6 +108,26 @@ class MicroRTSGame:
                     elif target == player:
                         r[4] -= 1
         return rewards, gameover
+
+    def needs_decision(self) -> bool:
+        """True if either player has an idle unit, i.e. an action could change the game."""
+        assignments = self.gs.assignments
+        return any(u.player >= 0 and u.id not in assignments for u in self.gs.units)
+
+    def step_without_decision(self) -> tuple[np.ndarray, bool]:
+        """Run one tick when no unit is idle; same result as ``step`` with all-wait actions."""
+        if self.needs_decision():
+            raise RuntimeError("a unit is idle; use step() so its action is not dropped")
+        gameover = self.gs.cycle()
+        return self._win_loss(gameover), gameover
+
+    def _win_loss(self, gameover: bool) -> np.ndarray:
+        rewards = np.zeros((2, len(REWARD_NAMES)), dtype=np.float64)
+        if gameover:
+            winner = self.gs.winner()
+            for player in (0, 1):
+                rewards[player, 0] = 1.0 if winner == player else -1.0
+        return rewards
 
     # ---------------------------------------------------------- observation
     def raw_observation(self, player: int) -> np.ndarray:
