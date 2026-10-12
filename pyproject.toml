@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+train = ["torch>=2.1"]
 
 [project.urls]
 "MicroRTS" = "https://github.com/Farama-Foundation/MicroRTS"
