@@ -38,7 +38,7 @@ def main(argv=None):
     ap.add_argument("--max-steps", type=int, default=2000)
     ap.add_argument("--deterministic", action="store_true", help="take the most likely action instead of sampling")
     ap.add_argument("--record", help="directory for HTML replays")
-    ap.add_argument("--record-games", type=int, default=2, help="how many replays to keep (wins first)")
+    ap.add_argument("--record-games", type=int, default=2, help="how many replays to keep (wins first, then the most unit types)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args(argv)
@@ -52,18 +52,21 @@ def main(argv=None):
         env.reset(seed=args.seed + g)
         game = env.unwrapped.game
         players = {side: agent, 1 - side: opp}
+        built = set()  # unit and structure types the agent owned at some point
         while env.agents:
             actions = {a: np.asarray(players[i].act(game, i)).reshape(-1) for i, a in enumerate(env.possible_agents)}
             _, _, _, _, infos = env.step(actions)
+            built.update(u.type.name for u in game.gs.units if u.player == side)
         winner = infos["player_0"].get("winner")
         me = env.possible_agents[side]
         result = 0 if winner is None else (1 if winner == me else -1)
         results.append(result)
         label = {1: "win", 0: "draw", -1: "loss"}[result]
-        print(f"game {g + 1}: agent as {me} vs {args.opponent}: {label} at tick {game.gs.time}")
+        print(f"game {g + 1}: agent as {me} vs {args.opponent}: {label} at tick {game.gs.time}, "
+              f"built {', '.join(sorted(built))}")
         if args.record:
-            kept.append((-result, g, side, label, list(env.replay_frames), env.replay_meta()))
-            kept.sort(key=lambda k: k[:2])
+            kept.append((-result, -len(built), g, side, label, list(env.replay_frames), env.replay_meta()))
+            kept.sort(key=lambda k: k[:3])
             del kept[args.record_games :]
 
     r = np.array(results)
@@ -73,7 +76,7 @@ def main(argv=None):
 
         os.makedirs(args.record, exist_ok=True)
         opp = os.path.splitext(os.path.basename(args.opponent))[0]
-        for _, g, side, label, frames, meta in kept:
+        for _, _, g, side, label, frames, meta in kept:
             path = os.path.join(args.record, f"agent_vs_{opp}_game{g + 1}_{label}.html")
             save_replay_html(meta, frames, path, title=f"Trained agent (player {side}) vs {opp}: {label}")
             print("replay written to", path)
