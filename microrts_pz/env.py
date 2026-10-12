@@ -46,6 +46,12 @@ class MicroRTSParallelEnv(ParallelEnv):
 
     An episode terminates when one side has no units left and is truncated
     after ``max_steps`` ticks.
+
+    With ``fast_forward=True`` a ``step`` keeps running ticks until a unit of
+    either player is idle again (or the episode ends), since no action could
+    change those ticks. The game is identical tick for tick; ``step`` returns
+    the rewards summed over the ticks it ran and ``infos[agent]["ticks"]``
+    says how many that was.
     """
 
     metadata = {
@@ -63,6 +69,7 @@ class MicroRTSParallelEnv(ParallelEnv):
         partial_obs: bool = False,
         unit_type_table_version: int = VERSION_ORIGINAL,
         move_conflict_resolution: int = MOVE_CONFLICT_RESOLUTION_CANCEL_BOTH,
+        fast_forward: bool = False,
         render_mode: str | None = None,
         record_replay: bool = False,
         viewer_port: int = 0,
@@ -76,6 +83,7 @@ class MicroRTSParallelEnv(ParallelEnv):
         if self.reward_weight.shape != (len(REWARD_NAMES),):
             raise ValueError(f"reward_weight must have {len(REWARD_NAMES)} entries")
         self.partial_obs = partial_obs
+        self.fast_forward = fast_forward
         self.render_mode = render_mode
         self.record_replay = record_replay or render_mode == "human"
         self._viewer_port = viewer_port
@@ -143,6 +151,14 @@ class MicroRTSParallelEnv(ParallelEnv):
                 grids.append(np.asarray(act, dtype=np.int64).reshape(self.game.num_cells, -1))
         raw, gameover = self.game.step(grids[0], grids[1])
         self.num_steps += 1
+        ticks = 1
+        if self.fast_forward:
+            while not gameover and self.num_steps < self.max_steps and not self.game.needs_decision():
+                self._show_tick()
+                r, gameover = self.game.step_without_decision()
+                raw += r
+                self.num_steps += 1
+                ticks += 1
         truncated = not gameover and self.num_steps >= self.max_steps
         winner = self.game.winner if gameover else None
 
@@ -153,18 +169,21 @@ class MicroRTSParallelEnv(ParallelEnv):
             rewards[agent] = float(self.reward_weight @ raw[i])
             terminations[agent] = gameover
             truncations[agent] = truncated
-            info = {"raw_rewards": raw[i].copy(), "time": self.game.gs.time}
+            info = {"raw_rewards": raw[i].copy(), "time": self.game.gs.time, "ticks": ticks}
             if gameover:
                 info["winner"] = None if winner < 0 else self.possible_agents[winner]
             infos[agent] = info
 
+        self._show_tick()
+        if gameover or truncated:
+            self.agents = []
+        return observations, rewards, terminations, truncations, infos
+
+    def _show_tick(self) -> None:
         if self.record_replay:
             self._record()
         if self.render_mode == "human":
             self.render()
-        if gameover or truncated:
-            self.agents = []
-        return observations, rewards, terminations, truncations, infos
 
     def _observe(self, agent: str) -> dict[str, np.ndarray]:
         i = self._agent_ids[agent]
