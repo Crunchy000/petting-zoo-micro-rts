@@ -8,5 +8,6 @@ python tools/sprites/cut_sheet.py   # sheet -> microrts_pz/render/sprites/*.png 
 python tools/sprites/embed.py       # PNGs  -> WebP data URIs inside viewer.html
 ```
 
-The art faces left; the viewer mirrors player 0's vehicles so both armies
-face each other, and draws the glowing team rings itself.
+The art faces right; the viewer mirrors player 1's units so both armies
+face each other. Grid positions and the cell-to-sprite mapping live at the
+top of `cut_sheet.py`.

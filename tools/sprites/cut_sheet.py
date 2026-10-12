@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Cut ``sprite_sheet.jpg`` into transparent PNGs in ``microrts_pz/render/sprites``.
 
-The sheet is a 4x4 grid on a flat dark background. Each cell is cropped, the
+The sheet is a grid (5 columns x 4 rows) on a flat dark background. Each cell is cropped, the
 background connected to the cell border is keyed out (with a soft, colour
 corrected edge) and the sprite is trimmed and scaled to at most 112 px.
 Run ``embed.py`` afterwards to inline the result into the viewer.
@@ -17,13 +17,13 @@ from scipy import ndimage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "..", "microrts_pz", "render", "sprites")
-XS = [20, 183, 348, 511, 675, 839]  # grid line positions in the sheet
-YS = [22, 156, 291, 424, 556]
-BG = np.array([36.0, 40.0, 49.0])
+XS = [35, 231, 427, 623, 819, 1015]  # grid line positions in the sheet
+YS = [27, 163, 299, 436, 570]
+BG = np.array([34.0, 39.0, 45.0])
 CELLS = {
-    (0, 0): "Base_0", (0, 1): "Barracks_0", (0, 2): "Worker_0", (0, 3): "Resource",
+    (0, 0): "Base_0", (0, 1): "Barracks_0", (0, 2): "Worker_0", (0, 3): "Resource", (0, 4): "Resource_small",
     (1, 0): "Light_0", (1, 1): "Ranged_0", (1, 2): "Heavy_0",
-    (2, 0): "Base_1", (2, 1): "Barracks_1", (2, 2): "Worker_1", (2, 4): "Resource_small",
+    (2, 0): "Base_1", (2, 1): "Barracks_1", (2, 2): "Worker_1",
     (3, 0): "Light_1", (3, 1): "Ranged_1", (3, 2): "Heavy_1",
 }
 
