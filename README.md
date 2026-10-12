@@ -229,6 +229,13 @@ games against the mixed-army bot, 75% against Ranged and 100% against Heavy,
 but loses most games to the Light rush. The sample games on the website come
 from it.
 
+`training/agents/agent_16x16_maps.pt` continues from it for 200M steps on 15
+16×16 maps (about four hours on an L4, `train_jax.py` with `--init` and several
+`--map` flags, the Light rush weighted double). Against the mixed bot it wins
+38 to 100% of games on those maps, where the first agent won 0 to 88%. The
+website's [maps page](https://crunchy000.github.io/petting-zoo-micro-rts/maps.html)
+has a replay and both agents' win rates for every bundled map.
+
 ```bash
 pip install -e ".[jax]"          # plus "jax[cuda12]" on an NVIDIA GPU
 python training/train_jax.py --map maps/8x8/basesWorkers8x8A.xml --bc-steps 1000000 --max-steps 1000 --out runs/8x8
