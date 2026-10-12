@@ -17,6 +17,9 @@ Workloads, each reported as environment steps (game ticks) per second:
   values). PyTorch on the GPU for the Numba engine, as in
   ``training/train_selfplay.py``; the JAX port of the same network for the JAX
   engine, traced into one ``lax.scan`` with the engine.
+* ``update``: one PPO epoch (forward, backward, Adam) of the same network over
+  ``--update-batch`` mid-game samples, PyTorch with AMP vs JAX in bfloat16
+  (reported as samples per second; the ``numba`` row is PyTorch).
 """
 
 from __future__ import annotations

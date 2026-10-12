@@ -206,17 +206,39 @@ still appear and the actions issued that tick are missing). This port
 observes the state after the tick. The parity harness compares against a
 fresh Java snapshot for that reason.
 
-### Why not JAX (yet)
+### JAX engine
 
-This release uses NumPy. MicroRTS's rules depend on order: actions resolve
-sequentially, conflicts are settled by issue order, and units killed mid-tick
-still act. Reproducing that exactly in a jit-compiled, fixed-shape JAX
-kernel is a substantial project of its own, and exact parity was the
-priority here. The engine is small (`engine.py`) and parity-tested, so it
-can serve as the reference for a later `jax`/`vmap` backend. The current
-engine runs about 1,400 ticks per second on 16×16 maps (both players, masks
-and observations included) on one CPU core. For large-scale training, run
-it with PettingZoo/SuperSuit vector wrappers or one process per environment.
+`microrts_pz.jax_engine.JaxBatchGame` (`pip install -e ".[jax]"`) runs a whole
+batch of games as one JAX program, so the games can live on the GPU next to
+the policy and be traced into a single jitted rollout. It stores units per
+map cell and reproduces the order-dependent rules above without a loop over
+units (the `core.py` docstring explains how). `tests/test_jax_engine.py`
+checks it against `engine.py` every tick: state, observations, masks,
+rewards and game-over, over random, scripted and deliberately illegal play
+on six maps, plus `fast_forward`. Full observability and deterministic
+unit tables (versions 1 and 2) only.
+
+```python
+from microrts_pz.jax_engine import JaxBatchGame
+games = JaxBatchGame(["maps/16x16/basesWorkers16x16.xml"], num_games=1024)
+games.reset()
+obs, mask = games.observe(player=0)            # (B, H, W, 29), (B, H*W, 78)
+raw, over, trunc, winner = games.step(a0, a1)  # gridnet actions (B, H*W, 7)
+# fully jitted: games.step_fn(state, a0, a1), games.observe_fn(state, player)
+```
+
+On an NVIDIA L4, 16×16 map, `tools/bench/engines.py` (steps = game ticks
+per second, both players):
+
+| workload | Numba (12 CPU cores) + PyTorch | JAX on the GPU |
+|---|---|---|
+| engine only, random legal actions, 1,024 games | 52,600 | 409,000 |
+| self-play rollout with the gridnet policy, 256 games | 17,100 | 68,400 |
+| self-play rollout with the gridnet policy, 4,096 games | 12,000 | 55,100 |
+| PPO update, samples per epoch | 28,300 | 36,800 |
+
+On a CPU the JAX engine is roughly 20× slower than the Numba one; use it on
+an accelerator.
 
 ## Differences from MicroRTS-Py
 
