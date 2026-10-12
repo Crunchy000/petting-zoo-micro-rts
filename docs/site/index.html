@@ -59,7 +59,7 @@
   <strong>MicroRTS · PettingZoo</strong>
   <nav>
     <a href="#install">Install</a><a href="#usage">Usage</a><a href="#env">Environment</a>
-    <a href="#viewer">Viewer</a><a href="#license">License</a><a href="https://github.com/Crunchy000/petting-zoo-micro-rts">GitHub</a>
+    <a href="#viewer">Viewer</a><a href="#training">Training</a><a href="#license">License</a><a href="https://github.com/Crunchy000/petting-zoo-micro-rts">GitHub</a>
   </nav>
 </div></header>
 
@@ -69,16 +69,16 @@
     <p>A two-player real-time strategy game for multi-agent RL. The engine is pure Python, matches the original Java engine tick for tick, and comes with action masks and a browser viewer with sound.</p>
     <div class="btns">
       <a class="btn primary" href="#usage">Get started</a>
-      <a class="btn" href="replay.html">Open the sample replay</a>
+      <a class="btn" href="games/agent-vs-mixed.html">Watch a trained agent</a>
       <a class="btn" href="https://github.com/Crunchy000/petting-zoo-micro-rts">Source on GitHub</a>
     </div>
   </div>
 
   <div class="demo">
-    <iframe src="replay.html" title="Sample MicroRTS replay" loading="lazy"></iframe>
+    <iframe src="games/agent-vs-mixed.html" title="Trained agent vs the mixed-army bot" loading="lazy"></iframe>
     <div class="cap">
-      <span>Two bundled bots on <code>basesWorkers16x16</code>, each building every unit and structure type.</span>
-      <span>Space: play/pause · ←/→: step · m: sound · <a href="replay-2.html">another game</a></span>
+      <span>A trained agent (player 0) beats the bundled mixed-army bot on <code>basesWorkers16x16</code>, using every unit and structure type.</span>
+      <span>Space: play/pause · ←/→: step · m: sound · more: <a href="games/agent-vs-ranged.html">vs Ranged</a> · <a href="games/agent-vs-heavy.html">vs Heavy</a> · <a href="replay.html">bot vs bot</a> · <a href="replay-2.html">bots on letMeOut</a></span>
     </div>
   </div>
 
@@ -174,6 +174,15 @@ env.<span class="f">save_replay</span>(<span class="s">"game.html"</span>)</pre>
     <pre>python examples/replay_bots.py --out replay.html   <span class="c"># save a bot game</span>
 python examples/replay_bots.py --live              <span class="c"># watch it live</span></pre>
     <p>Sound effects are generated with the Web Audio API and panned by map position. Browsers only play audio after a click, so press 🔇 to turn it on.</p>
+  </section>
+
+  <section id="training">
+    <h2>Training agents</h2>
+    <p>The sample games above are played by an agent trained with PPO and invalid-action masking (<a href="https://github.com/Crunchy000/petting-zoo-micro-rts/tree/main/training"><code>training/</code></a>). It starts by imitating the bundled scripted bots, then plays against a pool of those bots and earlier copies of itself. The model shipped in <code>training/agents/agent_16x16.pt</code> had about 16 million steps on one Colab L4 GPU, roughly three hours. Against the bots it wins about 60% of games against the mixed army, 75% against Ranged and all of them against Heavy, but still loses most games to the Light rush.</p>
+    <pre>pip install -e ".[train]"                <span class="c"># torch + numba</span>
+python training/train_selfplay.py --map maps/16x16/basesWorkers16x16.xml --bc-steps 2000000 --out runs/16x16
+python training/play.py runs/16x16/latest.pt --opponent mixed --games 10 --record replays/</pre>
+    <p>Training runs the games on <code>microrts_pz.fast.BatchGame</code>, a compiled batch engine that steps hundreds of games at once across all CPU cores and is checked against the reference engine tick by tick. A Colab notebook, <code>training/train_colab.ipynb</code>, runs the same steps in the browser.</p>
   </section>
 
   <section id="license">

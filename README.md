@@ -206,17 +206,42 @@ still appear and the actions issued that tick are missing). This port
 observes the state after the tick. The parity harness compares against a
 fresh Java snapshot for that reason.
 
+## Training agents
+
+`training/` has a PPO trainer with invalid-action masking and self-play
+(`train_selfplay.py`), an evaluator that records HTML replays (`play.py`) and
+a Colab notebook. A trained 16×16 agent ships in `training/agents/agent_16x16.pt`.
+It had about 16M steps, roughly three hours on one Colab L4. It wins about 60%
+of games against the mixed-army bot, 75% against Ranged and 100% against Heavy,
+but loses most games to the Light rush. The sample games on the website come
+from it.
+
+```bash
+pip install -e ".[train]"        # torch + numba
+python training/train_selfplay.py --map maps/16x16/basesWorkers16x16.xml --bc-steps 2000000 --out runs/16x16
+python training/play.py training/agents/agent_16x16.pt --opponent mixed --games 10 --record replays/
+```
+
+### Fast batched engine
+
+For training there is a compiled batch engine, `microrts_pz.fast.BatchGame`
+(`pip install -e ".[fast]"`, which adds Numba). It steps many games of one map
+size in a single call spread over all CPU cores, returns observations, masks
+and rewards as arrays, and includes compiled versions of the scripted bots.
+`tests/test_fast.py` checks it against `engine.py` tick by tick (observations,
+masks, rewards, game over and bot moves). On a 4-core machine it runs about
+95,000 ticks per second on 16×16 maps with both bots playing, against roughly
+5,000 per core for the pure-Python engine. It covers fully observed games
+with the deterministic unit tables; use the PettingZoo env for the rest.
+
 ### Why not JAX (yet)
 
-This release uses NumPy. MicroRTS's rules depend on order: actions resolve
-sequentially, conflicts are settled by issue order, and units killed mid-tick
-still act. Reproducing that exactly in a jit-compiled, fixed-shape JAX
-kernel is a substantial project of its own, and exact parity was the
-priority here. The engine is small (`engine.py`) and parity-tested, so it
-can serve as the reference for a later `jax`/`vmap` backend. The current
-engine runs about 1,400 ticks per second on 16×16 maps (both players, masks
-and observations included) on one CPU core. For large-scale training, run
-it with PettingZoo/SuperSuit vector wrappers or one process per environment.
+MicroRTS's rules depend on order: actions resolve sequentially, conflicts are
+settled by issue order, and units killed mid-tick still act. Reproducing that
+exactly in a jit-compiled, fixed-shape JAX kernel is a substantial project of
+its own, and exact parity was the priority here. The engine is small
+(`engine.py`) and parity-tested, so it can serve as the reference for a later
+`jax`/`vmap` backend, checked with the same tick-by-tick tests as the Numba one.
 
 ## Differences from MicroRTS-Py
 
