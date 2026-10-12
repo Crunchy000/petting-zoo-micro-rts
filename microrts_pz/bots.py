@@ -10,6 +10,7 @@ partial observability. ``WorkerRushBot`` is a simplified take on MicroRTS's
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -49,11 +50,14 @@ class WorkerRushBot:
     With ``army="Light"`` (or ``"Heavy"``/``"Ranged"``) a harvester builds one
     barracks once it can afford it, the base trains only enough workers to
     keep the economy going, and the barracks trains that unit type instead.
+    ``army`` may also be a sequence such as ``("Light", "Heavy", "Ranged")``,
+    which the barracks trains in turn.
     """
 
-    def __init__(self, harvesters: int = 1, army: str | None = None):
+    def __init__(self, harvesters: int = 1, army: str | Sequence[str] | None = None):
         self.harvesters = harvesters
-        self.army = army
+        self.army = (army,) if isinstance(army, str) else tuple(army) if army else None
+        self._next_unit = 0
 
     # -- helpers
     @staticmethod
@@ -124,11 +128,14 @@ class WorkerRushBot:
                 if u.type.is_stockpile:
                     wanted = "Worker" if self.army is None or len(workers) < self.harvesters + 1 else None
                 else:
-                    wanted = self.army or "Light"
+                    army = self.army or ("Light",)
+                    wanted = army[self._next_unit % len(army)]
                 options = [a for a in produces if a.unit_type.name == wanted]
                 if options:
                     a = options[0]
                     row[0], row[4], row[5] = TYPE_PRODUCE, a.parameter, a.unit_type.id
+                    if not u.type.is_stockpile:
+                        self._next_unit += 1
                 continue
             if want_barracks and u.id in harvester_ids:
                 options = [a for a in produces if a.unit_type.name == "Barracks"]

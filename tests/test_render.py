@@ -70,3 +70,19 @@ def test_bots_produce_valid_games():
     while env.agents:
         _, _, _, _, infos = env.step({a: bots[i].act(game, i) for i, a in enumerate(env.possible_agents)})
     assert infos["player_0"].get("winner") == "player_0"
+
+
+def test_mixed_army_bots_build_every_unit_type():
+    # the sample replays rely on this to show every sprite
+    env = microrts_v0.parallel_env(map_path="maps/16x16/basesWorkers16x16.xml", max_steps=2000)
+    env.reset(seed=0)
+    game = env.unwrapped.game
+    bots = [WorkerRushBot(harvesters=2, army=("Heavy", "Ranged", "Light")), WorkerRushBot(harvesters=2, army=("Light", "Ranged", "Heavy"))]
+    seen = [set(), set()]
+    while env.agents:
+        env.step({a: bots[i].act(game, i) for i, a in enumerate(env.possible_agents)})
+        for u in game.gs.units:
+            if u.player >= 0:
+                seen[u.player].add(u.type.name)
+    everything = {"Base", "Barracks", "Worker", "Light", "Heavy", "Ranged"}
+    assert seen == [everything, everything]
