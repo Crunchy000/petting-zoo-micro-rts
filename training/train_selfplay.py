@@ -272,16 +272,17 @@ def main(argv=None):
         take_snapshot(0)
 
     N, T = args.num_envs, args.num_steps
-    obs_buf = torch.zeros((T, N, H, W, C), dtype=torch.int8)
-    mask_buf = torch.zeros((T, N, cells, mask_w), dtype=torch.bool)
-    act_buf = torch.zeros((T, N, cells, len(ACTION_DIMS)), dtype=torch.long)
-    logp_buf = torch.zeros((T, N))
-    rew_buf = torch.zeros((T, N))
-    done_buf = torch.zeros((T, N))
-    val_buf = torch.zeros((T, N))
+    # Rollout buffers live on the training device, so minibatches never cross the PCIe bus.
+    obs_buf = torch.zeros((T, N, H, W, C), dtype=torch.int8, device=device)
+    mask_buf = torch.zeros((T, N, cells, mask_w), dtype=torch.bool, device=device)
+    act_buf = torch.zeros((T, N, cells, len(ACTION_DIMS)), dtype=torch.long, device=device)
+    logp_buf = torch.zeros((T, N), device=device)
+    rew_buf = torch.zeros((T, N), device=device)
+    done_buf = torch.zeros((T, N), device=device)
+    val_buf = torch.zeros((T, N), device=device)
 
     state = vec.reset(len(snapshot_models))
-    next_done = torch.zeros(N)
+    next_done = torch.zeros(N, device=device)
     recent = defaultdict(lambda: deque(maxlen=100))
     returns = deque(maxlen=100)
     metrics_path = os.path.join(args.out, "metrics.csv")
@@ -308,15 +309,19 @@ def main(argv=None):
             print("behaviour cloning done, switching to PPO")
 
         model.eval()
+        t_roll = time.time()
         for t in range(T):
-            obs = torch.as_tensor(np.stack([s[0] for s in state]))
-            mask = torch.as_tensor(np.stack([s[1] for s in state]).reshape(N, cells, mask_w)).bool()
+            obs = torch.as_tensor(np.stack([s[0] for s in state])).to(device, non_blocking=True)
+            mask = torch.as_tensor(np.stack([s[1] for s in state]).reshape(N, cells, mask_w)).to(device, non_blocking=True).bool()
             obs_buf[t], mask_buf[t], done_buf[t] = obs, mask, next_done
             with torch.no_grad():
-                logits, value = model(obs.to(device))
-                act, logp, _, _ = masked_policy(logits, mask.to(device))
-            val_buf[t] = value.cpu()
-            learner = act.cpu().numpy()
+                if teaching:  # the bots act; only the value head is trained
+                    act, logp, value = None, None, model(obs)[1]
+                else:
+                    logits, value = model(obs)
+                    act, logp, _, _ = masked_policy(logits, mask)
+            val_buf[t] = value
+            learner = act.cpu().numpy() if act is not None else [None] * N
 
             opp_actions = [None] * N
             by_snap = defaultdict(list)
@@ -325,23 +330,23 @@ def main(argv=None):
                     by_snap[s[4]].append(i)
             for k, idx in by_snap.items():
                 net = snapshot_models[min(k, len(snapshot_models) - 1)]
-                o = torch.as_tensor(np.stack([state[i][2] for i in idx]), device=device)
-                m = torch.as_tensor(np.stack([state[i][3] for i in idx]).reshape(len(idx), cells, mask_w), device=device).bool()
+                o = torch.as_tensor(np.stack([state[i][2] for i in idx])).to(device)
+                m = torch.as_tensor(np.stack([state[i][3] for i in idx]).reshape(len(idx), cells, mask_w)).to(device).bool()
                 with torch.no_grad():
                     a, *_ = masked_policy(net(o)[0], m)
+                a = a.cpu().numpy()
                 for j, i in enumerate(idx):
-                    opp_actions[i] = a[j].cpu().numpy()
+                    opp_actions[i] = a[j]
 
             results = vec.step(list(learner), opp_actions)
             global_step += N
             if teaching:
-                taught = np.stack([r[8] for r in results])
-                act_buf[t] = torch.as_tensor(taught)
+                act_buf[t] = torch.as_tensor(np.stack([r[8] for r in results])).to(device)
             else:
-                act_buf[t] = act.cpu()
-                logp_buf[t] = logp.cpu()
-            rew_buf[t] = torch.tensor([r[5] for r in results], dtype=torch.float32)
-            next_done = torch.tensor([float(r[6]) for r in results])
+                act_buf[t] = act
+                logp_buf[t] = logp
+            rew_buf[t] = torch.tensor([r[5] for r in results], dtype=torch.float32).to(device)
+            next_done = torch.tensor([float(r[6]) for r in results]).to(device)
             for r in results:
                 if r[7] is not None:
                     opp, result, ret, _ = r[7]
@@ -351,11 +356,13 @@ def main(argv=None):
             state = [r[:5] for r in results]
 
         # bootstrap and GAE
+        t_roll = time.time() - t_roll
+        t_upd = time.time()
         with torch.no_grad():
             obs = torch.as_tensor(np.stack([s[0] for s in state])).to(device)
-            next_value = model(obs)[1].cpu()
-        adv = torch.zeros((T, N))
-        last = torch.zeros(N)
+            next_value = model(obs)[1]
+        adv = torch.zeros((T, N), device=device)
+        last = torch.zeros(N, device=device)
         for t in reversed(range(T)):
             nonterminal = 1.0 - (next_done if t == T - 1 else done_buf[t + 1])
             nv = next_value if t == T - 1 else val_buf[t + 1]
@@ -370,20 +377,20 @@ def main(argv=None):
         model.train()
         stats = defaultdict(list)
         for _ in range(args.epochs):
-            perm = torch.randperm(batch)
+            perm = torch.randperm(batch, device=device)
             for s in range(0, batch, mb):
                 i = perm[s : s + mb]
-                o, m, a = b_obs[i].to(device), b_mask[i].to(device), b_act[i].to(device)
+                o, m, a = b_obs[i], b_mask[i], b_act[i]
                 logits, value = model(o)
                 _, newlogp, ent, _ = masked_policy(logits, m, a)
-                v_loss = 0.5 * ((value - b_ret[i].to(device)) ** 2).mean()
+                v_loss = 0.5 * ((value - b_ret[i]) ** 2).mean()
                 if teaching:
                     bc_loss = -newlogp.mean()
                     loss = bc_loss + args.vf_coef * v_loss
                     stats["bc_loss"].append(bc_loss.item())
                 else:
-                    ratio = (newlogp - b_logp[i].to(device)).exp()
-                    ad = b_adv[i].to(device)
+                    ratio = (newlogp - b_logp[i]).exp()
+                    ad = b_adv[i]
                     ad = (ad - ad.mean()) / (ad.std() + 1e-8)
                     pg_loss = torch.max(-ad * ratio, -ad * ratio.clamp(1 - args.clip, 1 + args.clip)).mean()
                     loss = pg_loss - args.ent_coef * ent.mean() + args.vf_coef * v_loss
@@ -395,6 +402,7 @@ def main(argv=None):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 opt.step()
 
+        t_upd = time.time() - t_upd
         sps = int((global_step - start_step) / (time.time() - t0))
         win = np.mean(recent["all"]) if recent["all"] else float("nan")
         per_opp = " ".join(
@@ -403,7 +411,7 @@ def main(argv=None):
         mean = lambda k: float(np.mean(stats[k])) if stats[k] else float("nan")  # noqa: E731
         phase = "bc" if teaching else "ppo"
         print(f"[{phase}] step {global_step:>9,}  sps {sps:>5}  return {np.mean(returns) if returns else float('nan'):7.2f}  "
-              f"score {win:+.2f}  wins {per_opp}", flush=True)
+              f"score {win:+.2f}  rollout {t_roll:.1f}s update {t_upd:.1f}s  wins {per_opp}", flush=True)
         writer.writerow([global_step, phase, sps, len(recent["all"]), np.mean(returns) if returns else "", win, per_opp,
                          mean("pg_loss"), mean("v_loss"), mean("entropy"), mean("bc_loss")])
         metrics.flush()
