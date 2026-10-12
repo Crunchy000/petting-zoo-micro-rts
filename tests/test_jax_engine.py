@@ -85,6 +85,11 @@ def run_pair(map_path, specs, seed, ticks, version=1, conflict=1, check_every=1)
                 np.testing.assert_array_equal(obs[0], ref.observation(p), err_msg=f"observation p{p} tick {tick}")
                 np.testing.assert_array_equal(mask[0], ref.action_mask(p), err_msg=f"mask p{p} tick {tick}")
         actions = [np.asarray(b.act(ref, p)).reshape(ref.num_cells, -1) for p, b in enumerate(bots)]
+        for p, spec in enumerate(specs):
+            if spec[0] == "rush":  # the JAX port of the bot picks the same actions
+                np.testing.assert_array_equal(fast.bot_actions(p, "rush", spec[1], spec[2])[0], actions[p],
+                                              err_msg=f"rush bot p{p} tick {tick}")
+                assert fast.bot_counter[0, p] == bots[p]._next_unit
         raw, over = ref.step(actions[0], actions[1])
         fraw, fover, _, fwin = fast.step(actions[0][None], actions[1][None])
         np.testing.assert_array_equal(fraw[0], raw, err_msg=f"rewards tick {tick}")
@@ -98,6 +103,7 @@ def run_pair(map_path, specs, seed, ticks, version=1, conflict=1, check_every=1)
 
 MAPS = [
     "maps/8x8/basesWorkers8x8A.xml",
+    "maps/8x8/basesWorkers8x8Obstacle.xml",
     "maps/16x16/basesWorkers16x16.xml",
     "maps/16x16/TwoBasesBarracks16x16.xml",
     "maps/NoWhereToRun9x8.xml",
@@ -123,6 +129,23 @@ def test_matches_python_engine(map_path, matchup):
 def test_unit_tables_and_conflict_rules(version, conflict):
     run_pair("maps/8x8/basesWorkers8x8A.xml", [("chaos", 0.2), ("rush", 2, ("Heavy", "Ranged"))], seed=5,
              ticks=1500, version=version, conflict=conflict)
+
+
+def test_random_bot_plays_valid_components():
+    games = JaxBatchGame(["maps/16x16/basesWorkers16x16.xml"], num_games=16, max_steps=300)
+    games.reset(seed=3)
+    offs = games.rules.mask_offsets
+    seen = set()
+    for _ in range(300):
+        _, mask = games.observe(0)
+        a0 = games.bot_actions(0, "random")
+        for k in range(len(games.action_dims)):
+            sub = mask[..., offs[k] : offs[k + 1]].astype(bool)
+            picked = np.take_along_axis(sub, a0[..., k : k + 1], -1)[..., 0]
+            assert (picked | ~sub.any(-1)).all() and (a0[..., k][~sub.any(-1)] == 0).all()
+        seen.update(a0[..., 0][mask[..., 0].astype(bool)].tolist())
+        games.step(a0, games.bot_actions(1, ["rush", "random"] * 8, 2, "Light"))
+    assert seen >= {0, 1, 2, 4}
 
 
 def test_batch_auto_reset_and_truncation():
