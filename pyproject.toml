@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+jax = ["jax>=0.4.30"]
 
 [project.urls]
 "MicroRTS" = "https://github.com/Farama-Foundation/MicroRTS"
