@@ -25,6 +25,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+fast = ["numba>=0.60"]
+train = ["torch>=2.1", "numba>=0.60"]
 jax = ["jax>=0.4.30"]
 
 [project.urls]
