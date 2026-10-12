@@ -1,7 +1,8 @@
 # Viewer sprites
 
-`sprite_sheet.jpg` is the source artwork (AI-generated, CC0 1.0, see
-`THIRD_PARTY_NOTICES.md`). To change the sprites, edit or replace it, then:
+`sprite_sheet.jpg` and `spider_drones.jpg` (the drill drone used for the
+Light unit) are the source artwork (AI-generated, CC0 1.0, see
+`THIRD_PARTY_NOTICES.md`). To change the sprites, edit or replace them, then:
 
 ```bash
 python tools/sprites/cut_sheet.py   # sheet -> microrts_pz/render/sprites/*.png (needs scipy)

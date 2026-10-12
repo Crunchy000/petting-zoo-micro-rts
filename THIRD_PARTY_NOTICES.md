@@ -65,8 +65,8 @@ The browser viewer's sounds are synthesised at runtime with the Web Audio
 API, and its terrain and effects are drawn with the Canvas API. No
 third-party audio or font assets are included.
 
-The unit, building and resource sprites (`tools/sprites/sprite_sheet.jpg`,
-the PNGs cut from it in `microrts_pz/render/sprites/`, and their WebP copies
+The unit, building and resource sprites (`tools/sprites/sprite_sheet.jpg` and
+`tools/sprites/spider_drones.jpg`, the PNGs cut from them in `microrts_pz/render/sprites/`, and their WebP copies
 embedded in `microrts_pz/render/viewer.html`) are AI-generated artwork
 supplied by the project maintainers and dedicated to the public domain under
 [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/).
