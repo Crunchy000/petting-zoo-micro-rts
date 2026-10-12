@@ -14,6 +14,7 @@ rollout together with it:
     raw, over, trunc, winner = games.step(a0, a1)    # gridnet actions (B, H*W, 7)
 
 For a fully jitted loop use the pure functions ``games.step_fn(state, a0, a1)``
+(returning ``(state, raw, gameover, truncated, winner, ticks)``)
 and ``games.observe_fn(state, player)`` on ``games.state``.
 
 Full observability and deterministic unit tables only (see ``core``).
@@ -41,6 +42,11 @@ class JaxBatchGame:
     rewards describe the step that ended them). ``move_conflict_resolution``
     is accepted for interface compatibility: with gridnet actions the three
     strategies never differ (see ``core``).
+
+    With ``fast_forward`` a step keeps running ticks in a game until a unit
+    of either player is idle again (as ``parallel_env(fast_forward=True)``);
+    rewards are summed over those ticks, ``last_ticks`` says how many ran and
+    ``max_steps`` counts ticks.
     """
 
     def __init__(
@@ -51,6 +57,7 @@ class JaxBatchGame:
         unit_type_table_version: int = VERSION_ORIGINAL,
         move_conflict_resolution: int = MOVE_CONFLICT_RESOLUTION_CANCEL_BOTH,
         auto_reset: bool = True,
+        fast_forward: bool = False,
         map_index: Sequence[int] | None = None,
         device: jax.Device | None = None,
     ):
@@ -72,6 +79,8 @@ class JaxBatchGame:
         self.num_games = num_games
         self.max_steps = max_steps
         self.auto_reset = auto_reset
+        self.fast_forward = fast_forward
+        self.last_ticks = np.ones(num_games, dtype=np.int64)
         self.device = device
         inits = [rules.initial_state(s, i) for i, s in enumerate(specs)]
         self.init_states = State(*[jnp.asarray(np.stack(f)) for f in zip(*inits)])
@@ -80,16 +89,38 @@ class JaxBatchGame:
 
         init_states = self.init_states
 
+        def where(pick, a, b):
+            return jax.tree.map(lambda x, y: jnp.where(pick.reshape((-1,) + (1,) * (x.ndim - 1)), x, y), a, b)
+
+        def skip_ticks(s, raw, over, winner):
+            """``fast_forward``: run ticks in which no unit is idle (no action could change them)."""
+
+            def pending(s, over):
+                return ~over & (s.steps < max_steps) & ~jax.vmap(rules.needs_decision)(s)
+
+            def body(c):
+                s, raw, over, winner, ticks = c
+                p = pending(s, over)
+                s2 = jax.vmap(rules.cycle)(s)
+                s2 = s2._replace(steps=s2.steps + 1)
+                o2, w2 = jax.vmap(rules.outcome)(s2)
+                raw = raw.at[:, :, 0].add(jnp.where(p[:, None], jax.vmap(rules.win_loss)(o2, w2), 0.0))
+                return where(p, s2, s), raw, over | (p & o2), jnp.where(p, w2, winner), ticks + p
+
+            ticks = jnp.ones_like(over, dtype=jnp.int32)
+            return jax.lax.while_loop(lambda c: jnp.any(pending(c[0], c[2])), body, (s, raw, over, winner, ticks))
+
         def batch_step(state: State, a0, a1):
             s, raw, over, winner = jax.vmap(rules.step)(state, a0, a1)
-            steps = s.steps + 1
-            trunc = ~over & (steps >= max_steps)
-            s = s._replace(steps=steps)
+            s = s._replace(steps=s.steps + 1)
+            ticks = jnp.ones_like(over, dtype=jnp.int32)
+            if fast_forward:
+                s, raw, over, winner, ticks = skip_ticks(s, raw, over, winner)
+            trunc = ~over & (s.steps >= max_steps)
             if auto_reset:
-                done = over | trunc
                 fresh = jax.tree.map(lambda x: x[s.map_id], init_states)
-                s = jax.tree.map(lambda a, b: jnp.where(done.reshape((-1,) + (1,) * (a.ndim - 1)), b, a), s, fresh)
-            return s, raw, over, trunc, winner
+                s = where(over | trunc, fresh, s)
+            return s, raw, over, trunc, winner, ticks
 
         def batch_observe(state: State, player):
             players = jnp.broadcast_to(jnp.asarray(player, jnp.int32), state.time.shape)
@@ -124,7 +155,8 @@ class JaxBatchGame:
         shape = (self.num_games, self.num_cells, len(self.action_dims))
         a0 = jnp.asarray(action0, jnp.int32).reshape(shape)
         a1 = jnp.asarray(action1, jnp.int32).reshape(shape)
-        self.state, raw, over, trunc, winner = self.step_fn(self.state, a0, a1)
+        self.state, raw, over, trunc, winner, ticks = self.step_fn(self.state, a0, a1)
+        self.last_ticks = np.asarray(ticks, np.int64)
         return np.asarray(raw, np.float64), np.asarray(over), np.asarray(trunc), np.asarray(winner, np.int64)
 
     def observe(self, player):

@@ -159,7 +159,7 @@ def jax_rollout(map_path, B, T, repeats, dtype):
         obs, mask = jnp.concatenate([o0, o1]), jnp.concatenate([m0, m1])
         logits, value = P.apply(params, obs, dtype=dt)
         act, logp = P.sample(k, logits, mask, dims)
-        s, raw, over, trunc, _ = g.step_fn(s, act[:B], act[B:])
+        s, raw, over, trunc, *_ = g.step_fn(s, act[:B], act[B:])
         return (s, key), (obs, mask, act, logp, value, raw, over | trunc)
 
     roll = jax.jit(lambda s, key: jax.lax.scan(body, (s, key), None, length=T))
@@ -261,22 +261,18 @@ def jax_update(data, minibatches, repeats, dtype):
     mb = N // minibatches
 
     @jax.jit
-    def epoch(params, opt, key):
-        perm = jax.random.permutation(key, N)[: mb * minibatches].reshape(minibatches, mb)
-
-        def body(c, idx):
-            params, opt = c
-            batch = jax.tree.map(lambda x: x[idx], d)
-            grads = jax.grad(P.ppo_loss)(params, batch, dims, dt)
-            return P.adam_step(params, grads, opt), None
-
-        return jax.lax.scan(body, (params, opt), perm)[0]
+    def minibatch(params, opt, d, idx):
+        batch = jax.tree.map(lambda x: x[idx], d)
+        grads = jax.grad(P.ppo_loss)(params, batch, dims, dt)
+        return P.adam_step(params, grads, opt)
 
     st = {"c": (params, opt), "k": jax.random.PRNGKey(0)}
 
     def run():
         st["k"], k = jax.random.split(st["k"])
-        st["c"] = epoch(*st["c"], k)
+        perm = jax.random.permutation(k, N)[: mb * minibatches].reshape(minibatches, mb)
+        for i in range(minibatches):  # a Python loop: XLA:CPU runs convolutions inside lax.scan very slowly
+            st["c"] = minibatch(*st["c"], d, perm[i])
         jax.block_until_ready(st["c"])
 
     return N / timed(run, repeats)

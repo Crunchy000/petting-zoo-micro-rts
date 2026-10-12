@@ -455,14 +455,23 @@ class Rules:
         s, t0, u0, o0 = self._issue(s, 0, a0)
         s, t1, u1, o1 = self._issue(s, 1, a1)
         s = self.cycle(jax.lax.optimization_barrier(s))  # stops XLA re-computing the issue phase inside the cycle's fusions
+        over, winner = self.outcome(s)
+        raw = jnp.stack([self._rewards(0, t0, u0, o0), self._rewards(1, t1, u1, o1)])
+        raw = raw.at[:, 0].set(self.win_loss(over, winner))
+        return s, raw, over, winner
+
+    @staticmethod
+    def outcome(s: State):
+        """``(gameover, winner)``; winner is -1 for none."""
         n0 = jnp.sum((s.utype >= 0) & (s.player == 0))
         n1 = jnp.sum((s.utype >= 0) & (s.player == 1))
         over = (n0 + n1 == 0) | ((n0 > 0) != (n1 > 0))
         winner = jnp.where((n0 > 0) & (n1 == 0), 0, jnp.where((n1 > 0) & (n0 == 0), 1, -1))
-        wl = jnp.where(over, jnp.where(winner == jnp.arange(2), 1.0, -1.0), 0.0).astype(jnp.float32)
-        raw = jnp.stack([self._rewards(0, t0, u0, o0), self._rewards(1, t1, u1, o1)])
-        raw = raw.at[:, 0].set(wl)
-        return s, raw, over, winner
+        return over, winner
+
+    @staticmethod
+    def win_loss(over, winner):
+        return jnp.where(over, jnp.where(winner == jnp.arange(2), 1.0, -1.0), 0.0).astype(jnp.float32)
 
     def needs_decision(self, s: State):
         """Some unit of either player is idle."""

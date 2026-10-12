@@ -213,3 +213,33 @@ def test_attacks_and_targets_walking_away():
         5: (grid(W, H, (1, 3, 5, at(1, 0))), grid(W, H)),
     }
     run_script(spec(W, H, units), script, 60)
+
+
+@pytest.mark.parametrize("map_path", ["maps/8x8/basesWorkers8x8A.xml", "maps/16x16/basesWorkers16x16.xml"])
+def test_fast_forward_matches_the_env_option(map_path):
+    max_steps = 400
+    ref = MicroRTSGame(map_path, UnitTypeTable())
+    ref.reset()
+    fast = JaxBatchGame([map_path], num_games=1, max_steps=max_steps, auto_reset=False, fast_forward=True)
+    fast.reset()
+    bots = [WorkerRushBot(1), WorkerRushBot(1)]  # bases always busy, so whole ticks can be skipped
+    steps = 0
+    skipped = 0
+    while steps < max_steps:
+        actions = [np.asarray(b.act(ref, p)).reshape(ref.num_cells, -1) for p, b in enumerate(bots)]
+        raw, over = ref.step(actions[0], actions[1])
+        steps += 1
+        ticks = 1
+        while not over and steps < max_steps and not ref.needs_decision():  # as parallel_env(fast_forward=True)
+            r, over = ref.step_without_decision()
+            raw += r
+            steps += 1
+            ticks += 1
+        fraw, fover, ftrunc, _ = fast.step(actions[0][None], actions[1][None])
+        np.testing.assert_array_equal(fraw[0], raw)
+        assert fast.last_ticks[0] == ticks and fover[0] == over and ftrunc[0] == (not over and steps >= max_steps)
+        assert_same_state(fast, ref, f"at step {steps}")
+        skipped += ticks - 1
+        if over:
+            break
+    assert skipped > 0
