@@ -208,18 +208,30 @@ fresh Java snapshot for that reason.
 
 ## Training agents
 
-`training/` has a PPO trainer with invalid-action masking and self-play
-(`train_selfplay.py`), an evaluator that records HTML replays (`play.py`) and
-a Colab notebook. A trained 16×16 agent ships in `training/agents/agent_16x16.pt`.
-It had about 16M steps, roughly three hours on one Colab L4. It wins about 60%
-of games against the mixed-army bot, 75% against Ranged and 100% against Heavy,
+`training/` trains gridnet agents with PPO, invalid-action masking,
+behaviour-cloning warm starts and self-play, evaluates them and records HTML
+replays. **[`training/README.md`](training/README.md) is the full guide:**
+the recipe, every option, checkpoint formats, and how to use the batch
+engine, bots and network in your own training code.
+
+The main trainer, `train_jax.py`, runs everything in JAX on the GPU: the
+games, the scripted bots, the self-play opponents and the network. The
+earlier PyTorch trainer (`train_selfplay.py`, on the Numba engine) still
+works without JAX. Both write checkpoints that play in the PettingZoo
+environment, and [`train_colab.ipynb`](training/train_colab.ipynb) runs the
+whole recipe on a Colab GPU.
+
+A trained 16×16 agent ships in `training/agents/agent_16x16.pt`. It had
+about 16M steps, roughly three hours on one Colab L4. It wins about 60% of
+games against the mixed-army bot, 75% against Ranged and 100% against Heavy,
 but loses most games to the Light rush. The sample games on the website come
 from it.
 
 ```bash
-pip install -e ".[train]"        # torch + numba
-python training/train_selfplay.py --map maps/16x16/basesWorkers16x16.xml --bc-steps 2000000 --out runs/16x16
-python training/play.py training/agents/agent_16x16.pt --opponent mixed --games 10 --record replays/
+pip install -e ".[jax]"          # plus "jax[cuda12]" on an NVIDIA GPU
+python training/train_jax.py --map maps/8x8/basesWorkers8x8A.xml --bc-steps 1000000 --max-steps 1000 --out runs/8x8
+python training/train_jax.py --map maps/16x16/basesWorkers16x16.xml --init runs/8x8/latest.pkl --out runs/16x16
+python training/play.py runs/16x16/latest.pkl --opponent mixed --games 10 --record replays/
 ```
 
 ### Fast batched engine
@@ -243,14 +255,19 @@ map cell and reproduces the order-dependent rules above without a loop over
 units (the `core.py` docstring explains how). `tests/test_jax_engine.py`
 checks it against `engine.py` every tick: state, observations, masks,
 rewards and game-over, over random, scripted and deliberately illegal play
-on six maps, plus `fast_forward`. Full observability and deterministic
-unit tables (versions 1 and 2) only.
+on seven maps, plus `fast_forward`. JAX versions of `WorkerRushBot` and
+`RandomBot` are included (`games.bot_actions`, or the pure functions in
+`microrts_pz.jax_engine.bots`); the rush bot is checked to pick the Python
+bot's exact actions every tick. Full observability and deterministic unit
+tables (versions 1 and 2) only. See [`training/README.md`](training/README.md#using-the-pieces-in-your-own-training-code)
+for a jitted training loop built on it.
 
 ```python
 from microrts_pz.jax_engine import JaxBatchGame
 games = JaxBatchGame(["maps/16x16/basesWorkers16x16.xml"], num_games=1024)
 games.reset()
 obs, mask = games.observe(player=0)            # (B, H, W, 29), (B, H*W, 78)
+a1 = games.bot_actions(player=1, kind="rush", harvesters=2, army="Light")
 raw, over, trunc, winner = games.step(a0, a1)  # gridnet actions (B, H*W, 7)
 # fully jitted: games.step_fn(state, a0, a1), games.observe_fn(state, player)
 ```

@@ -11,11 +11,13 @@ rollout together with it:
     games = JaxBatchGame(["maps/16x16/basesWorkers16x16.xml"], num_games=4096, max_steps=2000)
     games.reset()
     obs, mask = games.observe(player=0)              # (B, H, W, C) int8, (B, H*W, 78) bool
+    a1 = games.bot_actions(player=1, kind="rush", harvesters=2, army=("Light", "Ranged", "Heavy"))
     raw, over, trunc, winner = games.step(a0, a1)    # gridnet actions (B, H*W, 7)
 
 For a fully jitted loop use the pure functions ``games.step_fn(state, a0, a1)``
 (returning ``(state, raw, gameover, truncated, winner, ticks)``)
-and ``games.observe_fn(state, player)`` on ``games.state``.
+and ``games.observe_fn(state, player)`` on ``games.state``; the scripted
+bots are in ``microrts_pz.jax_engine.bots``.
 
 Full observability and deterministic unit tables only (see ``core``).
 """
@@ -30,7 +32,10 @@ import numpy as np
 
 from ..engine import MapSpec, load_map
 from ..unit_types import MOVE_CONFLICT_RESOLUTION_CANCEL_BOTH, VERSION_ORIGINAL, UnitTypeTable
+from .bots import random_actions, rush_actions
 from .core import Rules, State
+
+KINDS = {"none": 0, "learner": 0, "random": 1, "rush": 2}
 
 
 class JaxBatchGame:
@@ -86,6 +91,8 @@ class JaxBatchGame:
         self.init_states = State(*[jnp.asarray(np.stack(f)) for f in zip(*inits)])
         self.map_idx = np.asarray(map_index if map_index is not None else np.arange(num_games) % len(specs), dtype=np.int32)
         self.state: State | None = None
+        self.bot_counter = np.zeros((num_games, 2), dtype=np.int32)  # each game's WorkerRushBot._next_unit per player
+        self._ids = {name: self.utt[name].id for name in ("Worker", "Barracks", "Light")}
 
         init_states = self.init_states
 
@@ -135,6 +142,16 @@ class JaxBatchGame:
         self.observe_fn = jax.jit(batch_observe)
         self.reset_fn = jax.jit(batch_reset)
         self.needs_decision_fn = jax.jit(jax.vmap(rules.needs_decision))
+        ids = self._ids
+
+        def batch_rush(state, player, harvesters, army, n_army, counter):
+            return jax.vmap(lambda s, p, h, a, n, c: rush_actions(rules, s, p, h, a, n, c, ids["Worker"], ids["Barracks"], ids["Light"]))(
+                state, player, harvesters, army, n_army, counter)
+
+        #: ``rush_fn(state, player (B,), harvesters (B,), army (B, 3), n_army (B,), counter (B,))`` -> ``(actions, counter)``
+        self.rush_fn = jax.jit(batch_rush)
+        self.random_fn = jax.jit(lambda key, mask: random_actions(rules, key, mask))
+        self._key = jax.random.PRNGKey(0)
 
     # ------------------------------------------------------------------ api
     def reset(self, seed: int | None = None, games: Sequence[int] | None = None) -> None:
@@ -149,6 +166,9 @@ class JaxBatchGame:
             self.state = jax.tree.map(lambda a, b: jnp.where(sel.reshape((-1,) + (1,) * (a.ndim - 1)), b, a), self.state, fresh)
         if self.device is not None:
             self.state = jax.device_put(self.state, self.device)
+        if seed is not None:
+            self._key = jax.random.PRNGKey(seed)
+        self.bot_counter[slice(None) if games is None else list(games)] = 0
 
     def step(self, action0, action1):
         """Advance every game one tick; returns NumPy ``(raw (B, 2, 6), gameover (B,), truncated (B,), winner (B,))``."""
@@ -157,12 +177,48 @@ class JaxBatchGame:
         a1 = jnp.asarray(action1, jnp.int32).reshape(shape)
         self.state, raw, over, trunc, winner, ticks = self.step_fn(self.state, a0, a1)
         self.last_ticks = np.asarray(ticks, np.int64)
+        if self.auto_reset:
+            self.bot_counter[np.asarray(over) | np.asarray(trunc)] = 0
         return np.asarray(raw, np.float64), np.asarray(over), np.asarray(trunc), np.asarray(winner, np.int64)
 
     def observe(self, player):
         """One-hot observations ``(B, H, W, C)`` int8 and masks ``(B, H*W, mask_size)`` for ``player`` (scalar or per game)."""
         obs, mask = self.observe_fn(self.state, player)
         return np.asarray(obs), np.asarray(mask, np.int8)
+
+    def bot_actions(self, player, kind="rush", harvesters=1, army=None, masks=None):
+        """Scripted actions ``(B, H*W, 7)``, as ``microrts_pz.fast.BatchGame.bot_actions``.
+
+        ``kind``: ``"rush"`` (``WorkerRushBot``), ``"random"`` (``RandomBot``)
+        or ``"none"``, one for all games or a sequence per game; likewise
+        ``player`` and ``harvesters``. ``army`` is a unit type name, a tuple of
+        names or ``None`` for all games, or a list with one of those per game.
+        ``masks`` is accepted for compatibility (the random bot computes its own).
+        """
+        B = self.num_games
+        players = np.broadcast_to(np.asarray(player, dtype=np.int32), (B,)).copy()
+        kinds = np.array([KINDS[k] for k in ([kind] * B if isinstance(kind, str) else kind)])
+        harv = np.broadcast_to(np.asarray(harvesters, dtype=np.int32), (B,)).copy()
+        armies = army if isinstance(army, list) and len(army) == B else [army] * B
+        army_ids = np.zeros((B, 3), dtype=np.int32)
+        n_army = np.zeros(B, dtype=np.int32)
+        for g, a in enumerate(armies):
+            names = () if a is None else ((a,) if isinstance(a, str) else tuple(a))
+            n_army[g] = len(names)
+            army_ids[g, : len(names)] = [self.utt[n].id for n in names]
+        out = np.zeros((B, self.num_cells, len(self.action_dims)), dtype=np.int64)
+        rush = kinds == 2
+        if rush.any():
+            idx = np.arange(B)
+            acts, counter = self.rush_fn(self.state, jnp.asarray(players), jnp.asarray(harv), jnp.asarray(army_ids),
+                                         jnp.asarray(n_army), jnp.asarray(self.bot_counter[idx, players]))
+            out[rush] = np.asarray(acts)[rush]
+            self.bot_counter[idx[rush], players[rush]] = np.asarray(counter)[rush]
+        if (kinds == 1).any():
+            self._key, sub = jax.random.split(self._key)
+            _, mask = self.observe_fn(self.state, jnp.asarray(players))
+            out[kinds == 1] = np.asarray(self.random_fn(sub, mask))[kinds == 1]
+        return out
 
     @property
     def time(self) -> np.ndarray:

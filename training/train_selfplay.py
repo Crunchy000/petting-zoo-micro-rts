@@ -36,33 +36,11 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import ACTION_DIMS, GridnetPolicy, load_policy, masked_policy, save_checkpoint  # noqa: E402
+from opponents import BOT_SPECS, BOTS, TEACHERS, parse_weights  # noqa: E402, F401
 
 from microrts_pz import microrts_v0  # noqa: E402
-from microrts_pz.bots import RandomBot, WorkerRushBot  # noqa: E402
 
-BOTS = {
-    "random": lambda seed: RandomBot(seed),
-    "rush": lambda seed: WorkerRushBot(),
-    "rush2": lambda seed: WorkerRushBot(harvesters=2),
-    "light": lambda seed: WorkerRushBot(harvesters=2, army="Light"),
-    "heavy": lambda seed: WorkerRushBot(harvesters=2, army="Heavy"),
-    "ranged": lambda seed: WorkerRushBot(harvesters=2, army="Ranged"),
-    "mixed": lambda seed: WorkerRushBot(harvesters=2, army=("Light", "Ranged", "Heavy")),
-}
-#: Bots the behaviour-cloning warm start imitates.
-TEACHERS = ("rush", "rush2", "light", "heavy", "ranged", "mixed")
 AGENTS = ("player_0", "player_1")
-
-
-def parse_weights(spec: str) -> dict[str, float]:
-    out = {}
-    for part in spec.split(","):
-        name, _, w = part.partition(":")
-        name = name.strip()
-        if name != "self" and name not in BOTS:
-            raise ValueError(f"unknown opponent {name!r}; choose from {sorted(BOTS)} or 'self'")
-        out[name] = float(w) if w else 1.0
-    return out
 
 
 # ------------------------------------------------------------------ workers
@@ -210,16 +188,7 @@ class VecGames:
 class FastGames:
     """``VecGames`` on the compiled batch engine (``microrts_pz.fast``): one process, all cores."""
 
-    #: (kind, harvesters, army) for each name in ``BOTS``.
-    SPECS = {
-        "random": ("random", 1, None),
-        "rush": ("rush", 1, None),
-        "rush2": ("rush", 2, None),
-        "light": ("rush", 2, "Light"),
-        "heavy": ("rush", 2, "Heavy"),
-        "ranged": ("rush", 2, "Ranged"),
-        "mixed": ("rush", 2, ("Light", "Ranged", "Heavy")),
-    }
+    SPECS = BOT_SPECS
 
     def __init__(self, num_envs, maps, env_kwargs, seed, opp_weights, teach):
         from microrts_pz.env import DEFAULT_REWARD_WEIGHT
