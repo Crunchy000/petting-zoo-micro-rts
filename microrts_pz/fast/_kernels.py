@@ -867,7 +867,7 @@ def reset_game(U, G, OCC, TER, g, W, map_units, map_res, map_ter):
         add_unit(U, G, OCC, g, W, r[0], r[1], r[2], r[3], r[4], r[5], r[6])
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def step_batch(U, G, OCC, TER, UTT, PROD, W, H, AG, strategy, a0, a1, raw, over, winner, max_steps,
                trunc, map_idx, map_units, map_nunits, map_res, map_ter, auto_reset):
     """Step every game; finished games are reset when ``auto_reset``."""
@@ -882,7 +882,7 @@ def step_batch(U, G, OCC, TER, UTT, PROD, W, H, AG, strategy, a0, a1, raw, over,
             reset_game(U, G, OCC, TER, g, W, map_units[m, : map_nunits[m]], map_res[m], map_ter[m])
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def observe_batch(U, G, OCC, TER, UTT, PROD, W, H, AG, n_types, offs, players, obs, mask):
     """Observation and action mask of ``players[g]`` in every game."""
     for g in prange(U.shape[0]):
@@ -890,7 +890,7 @@ def observe_batch(U, G, OCC, TER, UTT, PROD, W, H, AG, n_types, offs, players, o
         action_mask(U, G, OCC, TER, UTT, PROD, g, W, H, AG, players[g], offs, mask[g])
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def bots_batch(U, G, OCC, TER, UTT, PROD, W, H, AG, offs, players, kinds, harvesters, army, n_army,
                worker_t, barracks_t, light_t, masks, out):
     """Scripted actions for ``players[g]``: ``kinds[g]`` 0 = none, 1 = random, 2 = worker rush."""

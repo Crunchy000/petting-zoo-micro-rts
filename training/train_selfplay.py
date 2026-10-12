@@ -171,14 +171,31 @@ class VecGames:
         for r in self.remotes:
             r.send((cmd, data))
 
+    @staticmethod
+    def _state(packed):
+        """Per-env tuples from the workers -> the batch arrays ``collect`` reads."""
+        obs = np.stack([p[0] for p in packed])
+        mask = np.stack([p[1] for p in packed])
+        opp_obs, opp_mask = np.zeros_like(obs), np.zeros_like(mask)
+        for i, p in enumerate(packed):
+            if p[2] is not None:
+                opp_obs[i], opp_mask[i] = p[2], p[3]
+        snap = np.array([p[4] if p[2] is not None else -1 for p in packed])
+        return {"obs": obs, "mask": mask, "opp_obs": opp_obs, "opp_mask": opp_mask, "snap": snap}
+
     def reset(self, n_snapshots):
         self.broadcast("reset", n_snapshots)
-        return [x for r in self.remotes for x in r.recv()]
+        return self._state([x for r in self.remotes for x in r.recv()])
 
     def step(self, learner_actions, opp_actions):
+        """Returns ``(state, rewards, dones, finished episodes, teacher actions or None)``."""
         for r, idx in zip(self.remotes, self.split):
-            r.send(("step", ([learner_actions[i] for i in idx], [opp_actions[i] for i in idx])))
-        return [x for r in self.remotes for x in r.recv()]
+            r.send(("step", ([None if learner_actions is None else learner_actions[i] for i in idx],
+                             [opp_actions[i] for i in idx])))
+        results = [x for r in self.remotes for x in r.recv()]
+        taught = np.stack([r[8] for r in results]) if results[0][8] is not None else None
+        return (self._state([r[:5] for r in results]), np.array([r[5] for r in results], dtype=np.float32),
+                np.array([r[6] for r in results]), [r[7] for r in results if r[7] is not None], taught)
 
     def close(self):
         for r in self.remotes:
@@ -209,21 +226,23 @@ class FastGames:
         from microrts_pz.fast import BatchGame
 
         self.procs = []
-        self.N = num_envs
+        self.N = N = num_envs
         self.rng = np.random.default_rng(seed)
-        self.games = BatchGame(maps, num_games=num_envs, max_steps=env_kwargs.get("max_steps", 2000),
-                               map_index=self.rng.integers(len(maps), size=num_envs))
-        self.games.reset(seed=seed)
+        self.games = g = BatchGame(maps, num_games=N, max_steps=env_kwargs.get("max_steps", 2000),
+                                   map_index=self.rng.integers(len(maps), size=N))
+        g.reset(seed=seed)
         self.weight = np.asarray(DEFAULT_REWARD_WEIGHT)
         self.opp_weights = opp_weights
         self.teach = teach
         self.n_snapshots = 0
-        self.opp = [""] * num_envs
-        self.snapshot = np.full(num_envs, -1)
-        self.side = np.zeros(num_envs, dtype=np.int64)
-        self.teacher = [None] * num_envs
-        self.ret = np.zeros(num_envs)
-        self.length = np.zeros(num_envs, dtype=np.int64)
+        self.opp = [""] * N
+        self.snapshot = np.full(N, -1)
+        self.side = np.zeros(N, dtype=np.int64)
+        self.teacher = [None] * N
+        self.ret = np.zeros(N)
+        self.length = np.zeros(N, dtype=np.int64)
+        self._obs = [np.empty((N, g.height, g.width, g.num_channels), dtype=np.int8) for _ in range(2)]
+        self._mask = [np.empty((N, g.num_cells, g.mask_size), dtype=np.int8) for _ in range(2)]
 
     def _new_episode(self, i):
         names = [n for n in self.opp_weights if n != "self" or self.n_snapshots > 0]
@@ -234,20 +253,31 @@ class FastGames:
         self.side[i] = self.rng.integers(2)
         self.ret[i] = 0.0
         self.length[i] = 0
+        self._specs = None
 
-    def _pack(self):
-        g = self.games
-        o0, m0 = g.observe(0)
-        o1, m1 = g.observe(1)
-        self._masks = (m0, m1)
-        obs, mask = (o0, o1), (m0, m1)
-        out = []
-        for i in range(self.N):
-            me, opp = self.side[i], 1 - self.side[i]
-            selfplay = self.opp[i] == "self"
-            out.append((obs[me][i], mask[me][i].reshape(-1), obs[opp][i] if selfplay else None,
-                        mask[opp][i].reshape(-1) if selfplay else None, self.snapshot[i]))
-        return out
+    def _scripted_specs(self):
+        """Per player: bot kinds, harvesters and armies for every game (cached between episodes)."""
+        if self._specs is None:
+            specs = []
+            for player in (0, 1):
+                names = [(self.teacher[i] if self.side[i] == player else (None if self.opp[i] == "self" else self.opp[i]))
+                         for i in range(self.N)]
+                rows = [self.SPECS[n] if n else ("none", 1, None) for n in names]
+                specs.append(([r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows]))
+            self._specs = specs
+            self._selfplay = np.array([o == "self" for o in self.opp])
+            self._taught = np.array([t is not None for t in self.teacher])
+        return self._specs
+
+    def _state(self):
+        g, idx = self.games, np.arange(self.N)
+        for p in (0, 1):
+            g.observe(p, self._obs[p], self._mask[p])
+        obs, mask = np.stack(self._obs), np.stack(self._mask)  # (2, N, ...)
+        me, opp = self.side, 1 - self.side
+        return {"obs": obs[me, idx], "mask": mask[me, idx].reshape(self.N, -1),
+                "opp_obs": obs[opp, idx], "opp_mask": mask[opp, idx].reshape(self.N, -1),
+                "snap": np.where(self._selfplay, self.snapshot, -1)}
 
     def broadcast(self, cmd, data=None):
         if cmd == "snapshots":
@@ -256,55 +286,44 @@ class FastGames:
             self.teach = bool(data)
             for i in range(self.N):
                 self.teacher[i] = TEACHERS[self.rng.integers(len(TEACHERS))] if self.teach else None
+            self._specs = None
 
     def reset(self, n_snapshots):
         self.n_snapshots = n_snapshots
         self.games.reset()
         for i in range(self.N):
             self._new_episode(i)
-        return self._pack()
-
-    def _scripted(self, player, names):
-        kinds, harv, army = [], [], []
-        for n in names:
-            k, h, a = self.SPECS[n] if n else ("none", 1, None)
-            kinds.append(k)
-            harv.append(h)
-            army.append(a)
-        return self.games.bot_actions(player, kinds, harv, army, masks=self._masks[player])
+        self._scripted_specs()
+        return self._state()
 
     def step(self, learner_actions, opp_actions):
+        """Same contract as ``VecGames.step``; ``learner_actions``/``opp_actions`` are ``(N, cells, 7)`` arrays."""
         N, g = self.N, self.games
-        cells = g.num_cells
-        # who plays each side: the learner (or its teacher), a snapshot, or a bot
-        scripted = [[None] * N, [None] * N]
-        for i in range(N):
-            me, opp = self.side[i], 1 - self.side[i]
-            if self.teacher[i] is not None:
-                scripted[me][i] = self.teacher[i]
-            if self.opp[i] != "self":
-                scripted[opp][i] = self.opp[i]
-        acts = [self._scripted(0, scripted[0]), self._scripted(1, scripted[1])]
-        taught = [acts[self.side[i]][i].copy() if self.teacher[i] is not None else None for i in range(N)]
-        for i in range(N):
-            me, opp = self.side[i], 1 - self.side[i]
-            if self.teacher[i] is None:
-                acts[me][i] = np.asarray(learner_actions[i]).reshape(cells, -1)
-            if self.opp[i] == "self":
-                acts[opp][i] = np.asarray(opp_actions[i]).reshape(cells, -1)
-        raw, over, trunc, winner = g.step(acts[0], acts[1])
-        rew = raw @ self.weight  # (N, 2)
+        specs = self._scripted_specs()
+        acts = [g.bot_actions(p, *specs[p], masks=self._mask[p]) for p in (0, 1)]
+        idx = np.arange(N)
+        taught = acts[0].copy() if self._taught.any() else None
+        if taught is not None:
+            taught[self.side == 1] = acts[1][self.side == 1]
+        both = np.stack(acts)  # (2, N, cells, 7)
+        if learner_actions is not None:
+            learn = ~self._taught
+            both[self.side[learn], idx[learn]] = np.asarray(learner_actions).reshape(N, g.num_cells, -1)[learn]
+        if self._selfplay.any():
+            sp = self._selfplay
+            both[1 - self.side[sp], idx[sp]] = np.asarray(opp_actions).reshape(N, g.num_cells, -1)[sp]
+        raw, over, trunc, winner = g.step(both[0], both[1])
+        r = (raw @ self.weight)[idx, self.side].astype(np.float32)
         done = over | trunc
-        episodes = [None] * N
-        r = rew[np.arange(N), self.side]
         self.ret += r
         self.length += 1
+        episodes = []
         for i in np.flatnonzero(done):
             result = 0 if winner[i] < 0 else (1 if winner[i] == self.side[i] else -1)
-            episodes[i] = (self.opp[i], result, self.ret[i], self.length[i])
+            episodes.append((self.opp[i], result, self.ret[i], self.length[i]))
             self._new_episode(i)
-        state = self._pack()
-        return [(*state[i], r[i], bool(done[i]), episodes[i], taught[i]) for i in range(N)]
+        self._scripted_specs()
+        return self._state(), r, done, episodes, taught
 
     def close(self):
         pass
@@ -456,8 +475,8 @@ def main(argv=None):
         nonlocal state, next_done, global_step
         actor.eval()
         for t in range(T):
-            obs = torch.as_tensor(np.stack([s[0] for s in state])).to(device, non_blocking=True)
-            mask = torch.as_tensor(np.stack([s[1] for s in state]).reshape(N, cells, mask_w)).to(device, non_blocking=True).bool()
+            obs = torch.as_tensor(state["obs"]).to(device, non_blocking=True)
+            mask = torch.as_tensor(state["mask"]).to(device, non_blocking=True).view(N, cells, mask_w).bool()
             buf["obs"][t], buf["mask"][t], buf["done"][t] = obs, mask, next_done
             with torch.no_grad():
                 if teaching:  # the bots act; only the value head is trained
@@ -466,40 +485,33 @@ def main(argv=None):
                     logits, value = forward(actor, obs)
                     act, logp, _, _ = masked_policy(logits, mask)
             buf["val"][t] = value
-            learner = act.cpu().numpy() if act is not None else [None] * N
+            learner = act.cpu().numpy() if act is not None else None
 
-            opp_actions = [None] * N
-            by_snap = defaultdict(list)
-            for i, s in enumerate(state):
-                if s[2] is not None:
-                    by_snap[s[4]].append(i)
-            for k, idx in by_snap.items():
-                net = snapshot_models[min(k, len(snapshot_models) - 1)]
-                o = torch.as_tensor(np.stack([state[i][2] for i in idx])).to(device)
-                m = torch.as_tensor(np.stack([state[i][3] for i in idx]).reshape(len(idx), cells, mask_w)).to(device).bool()
+            opp_actions = np.zeros((N, cells, len(ACTION_DIMS)), dtype=np.int64)
+            snap = state["snap"]
+            for k in np.unique(snap[snap >= 0]):
+                idx = np.flatnonzero(snap == k)
+                net = snapshot_models[min(int(k), len(snapshot_models) - 1)]
+                o = torch.as_tensor(state["opp_obs"][idx]).to(device)
+                m = torch.as_tensor(state["opp_mask"][idx]).to(device).view(len(idx), cells, mask_w).bool()
                 with torch.no_grad():
                     a, *_ = masked_policy(forward(net, o)[0], m)
-                a = a.cpu().numpy()
-                for j, i in enumerate(idx):
-                    opp_actions[i] = a[j]
+                opp_actions[idx] = a.cpu().numpy()
 
-            results = vec.step(list(learner), opp_actions)
+            state, rew, done, episodes, taught = vec.step(learner, opp_actions)
             global_step += N
             if teaching:
-                buf["act"][t] = torch.as_tensor(np.stack([r[8] for r in results])).to(device)
+                buf["act"][t] = torch.as_tensor(taught).to(device)
             else:
                 buf["act"][t] = act
                 buf["logp"][t] = logp
-            buf["rew"][t] = torch.tensor([r[5] for r in results], dtype=torch.float32).to(device)
-            next_done = torch.tensor([float(r[6]) for r in results]).to(device)
-            for r in results:
-                if r[7] is not None:
-                    opp, result, ret, _ = r[7]
-                    recent[opp].append(result)
-                    recent["all"].append(result)
-                    returns.append(ret)
-            state = [r[:5] for r in results]
-        buf["next_obs"] = torch.as_tensor(np.stack([s[0] for s in state])).to(device)
+            buf["rew"][t] = torch.as_tensor(rew, dtype=torch.float32).to(device)
+            next_done = torch.as_tensor(done, dtype=torch.float32).to(device)
+            for opp, result, ret, _ in episodes:
+                recent[opp].append(result)
+                recent["all"].append(result)
+                returns.append(ret)
+        buf["next_obs"] = torch.as_tensor(state["obs"]).to(device)
         buf["next_done"] = next_done
         buf["teaching"] = teaching
 
