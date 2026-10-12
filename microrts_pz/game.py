@@ -66,6 +66,10 @@ class MicroRTSGame:
         self.num_planes = [5, 5, 3, self.n_types + 1, NUMBER_OF_ACTION_TYPES, 2]
         self.plane_offsets = np.concatenate([[0], np.cumsum(self.num_planes)])
         self.num_channels = int(self.plane_offsets[-1]) + (2 if partial_obs else 0)
+        # Precomputed indices for the one-hot encoding in observation().
+        self._plane_max = np.array(self.num_planes)[:, None] - 1
+        self._plane_starts = self.plane_offsets[:-1, None]
+        self._cell_index = np.arange(self.height * self.width)[None, :]
         self.gs: GameState | None = None
 
     # ------------------------------------------------------------------ api
@@ -147,11 +151,11 @@ class MicroRTSGame:
     def observation(self, player: int) -> np.ndarray:
         """One-hot feature planes, shape ``(H, W, C)``, dtype int8."""
         raw = self.raw_observation(player)
-        out = np.zeros((self.height, self.width, self.num_channels), dtype=np.int8)
-        ys, xs = np.mgrid[0 : self.height, 0 : self.width]
-        for i, n in enumerate(self.num_planes):
-            vals = np.clip(raw[i], 0, n - 1)
-            out[ys, xs, self.plane_offsets[i] + vals] = 1
+        out = np.zeros((self.num_cells, self.num_channels), dtype=np.int8)
+        k = len(self.num_planes)
+        vals = np.clip(raw[:k].reshape(k, -1), 0, self._plane_max) + self._plane_starts
+        out[self._cell_index, vals] = 1
+        out = out.reshape(self.height, self.width, self.num_channels)
         if self.partial_obs:
             out[:, :, -2] = raw[6]
             out[:, :, -1] = raw[7]

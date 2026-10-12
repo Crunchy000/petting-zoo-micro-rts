@@ -22,10 +22,12 @@ record HTML replays.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import multiprocessing as mp
 import os
 import sys
+import threading
 import time
 from collections import defaultdict, deque
 
@@ -218,6 +220,8 @@ def main(argv=None):
     ap.add_argument("--max-grad-norm", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--async-update", action=argparse.BooleanOptionalAction, default=None,
+                    help="learn from one rollout while playing the next (default: on with a GPU)")
     ap.add_argument("--no-amp", action="store_true", help="train in float32 on the GPU (mixed precision is ~10x faster on a T4)")
     args = ap.parse_args(argv)
 
@@ -280,14 +284,25 @@ def main(argv=None):
         take_snapshot(0)
 
     N, T = args.num_envs, args.num_steps
-    # Rollout buffers live on the training device, so minibatches never cross the PCIe bus.
-    obs_buf = torch.zeros((T, N, H, W, C), dtype=torch.int8, device=device)
-    mask_buf = torch.zeros((T, N, cells, mask_w), dtype=torch.bool, device=device)
-    act_buf = torch.zeros((T, N, cells, len(ACTION_DIMS)), dtype=torch.long, device=device)
-    logp_buf = torch.zeros((T, N), device=device)
-    rew_buf = torch.zeros((T, N), device=device)
-    done_buf = torch.zeros((T, N), device=device)
-    val_buf = torch.zeros((T, N), device=device)
+    batch = N * T
+
+    def new_buffers():
+        # Rollout buffers live on the training device, so minibatches never cross the PCIe bus.
+        return {
+            "obs": torch.zeros((T, N, H, W, C), dtype=torch.int8, device=device),
+            "mask": torch.zeros((T, N, cells, mask_w), dtype=torch.bool, device=device),
+            "act": torch.zeros((T, N, cells, len(ACTION_DIMS)), dtype=torch.long, device=device),
+            "logp": torch.zeros((T, N), device=device),
+            "rew": torch.zeros((T, N), device=device),
+            "done": torch.zeros((T, N), device=device),
+            "val": torch.zeros((T, N), device=device),
+        }
+
+    # With --async-update the GPU learns from one rollout while the workers play the next
+    # one with the previous weights (a one-update policy lag that PPO's clipping absorbs).
+    async_update = device.type == "cuda" if args.async_update is None else args.async_update
+    buffers = [new_buffers() for _ in range(2 if async_update else 1)]
+    actor = copy.deepcopy(model).eval() if async_update else model
 
     state = vec.reset(len(snapshot_models))
     next_done = torch.zeros(N, device=device)
@@ -301,34 +316,27 @@ def main(argv=None):
         writer.writerow(["step", "phase", "sps", "episodes", "mean_return", "win_rate", "per_opponent", "pg_loss", "v_loss", "entropy", "bc_loss"])
 
     global_step = start_step
-    batch = N * T
     num_updates = max(1, (args.total_steps - start_step) // batch)
     t0 = time.time()
     teaching = args.bc_steps > 0 and start_step < args.bc_steps
     if not teaching:
         vec.broadcast("teach", False)
 
-    for update in range(1, num_updates + 1):
-        frac = 1.0 - (update - 1.0) / num_updates
-        opt.param_groups[0]["lr"] = frac * args.lr
-        if teaching and global_step >= args.bc_steps:
-            teaching = False
-            vec.broadcast("teach", False)
-            print("behaviour cloning done, switching to PPO")
-
-        model.eval()
-        t_roll = time.time()
+    def collect(buf):
+        """Play T steps in every env with ``actor``; fill ``buf``."""
+        nonlocal state, next_done, global_step
+        actor.eval()
         for t in range(T):
             obs = torch.as_tensor(np.stack([s[0] for s in state])).to(device, non_blocking=True)
             mask = torch.as_tensor(np.stack([s[1] for s in state]).reshape(N, cells, mask_w)).to(device, non_blocking=True).bool()
-            obs_buf[t], mask_buf[t], done_buf[t] = obs, mask, next_done
+            buf["obs"][t], buf["mask"][t], buf["done"][t] = obs, mask, next_done
             with torch.no_grad():
                 if teaching:  # the bots act; only the value head is trained
-                    act, logp, value = None, None, forward(model, obs)[1]
+                    act, logp, value = None, None, forward(actor, obs)[1]
                 else:
-                    logits, value = forward(model, obs)
+                    logits, value = forward(actor, obs)
                     act, logp, _, _ = masked_policy(logits, mask)
-            val_buf[t] = value
+            buf["val"][t] = value
             learner = act.cpu().numpy() if act is not None else [None] * N
 
             opp_actions = [None] * N
@@ -349,11 +357,11 @@ def main(argv=None):
             results = vec.step(list(learner), opp_actions)
             global_step += N
             if teaching:
-                act_buf[t] = torch.as_tensor(np.stack([r[8] for r in results])).to(device)
+                buf["act"][t] = torch.as_tensor(np.stack([r[8] for r in results])).to(device)
             else:
-                act_buf[t] = act
-                logp_buf[t] = logp
-            rew_buf[t] = torch.tensor([r[5] for r in results], dtype=torch.float32).to(device)
+                buf["act"][t] = act
+                buf["logp"][t] = logp
+            buf["rew"][t] = torch.tensor([r[5] for r in results], dtype=torch.float32).to(device)
             next_done = torch.tensor([float(r[6]) for r in results]).to(device)
             for r in results:
                 if r[7] is not None:
@@ -362,25 +370,29 @@ def main(argv=None):
                     recent["all"].append(result)
                     returns.append(ret)
             state = [r[:5] for r in results]
+        buf["next_obs"] = torch.as_tensor(np.stack([s[0] for s in state])).to(device)
+        buf["next_done"] = next_done
+        buf["teaching"] = teaching
 
-        # bootstrap and GAE
-        t_roll = time.time() - t_roll
+    def learn(buf, lr, out):
+        """PPO (or behaviour-cloning) epochs on ``buf``; losses go to ``out``."""
         t_upd = time.time()
+        opt.param_groups[0]["lr"] = lr
+        val_buf, done_buf, rew_buf = buf["val"], buf["done"], buf["rew"]
         with torch.no_grad():
-            obs = torch.as_tensor(np.stack([s[0] for s in state])).to(device)
-            next_value = forward(model, obs)[1]
+            next_value = forward(model, buf["next_obs"])[1]
         adv = torch.zeros((T, N), device=device)
         last = torch.zeros(N, device=device)
         for t in reversed(range(T)):
-            nonterminal = 1.0 - (next_done if t == T - 1 else done_buf[t + 1])
+            nonterminal = 1.0 - (buf["next_done"] if t == T - 1 else done_buf[t + 1])
             nv = next_value if t == T - 1 else val_buf[t + 1]
             delta = rew_buf[t] + args.gamma * nv * nonterminal - val_buf[t]
             last = delta + args.gamma * args.gae_lambda * nonterminal * last
             adv[t] = last
         ret_buf = adv + val_buf
 
-        b_obs, b_mask, b_act = obs_buf.reshape(batch, H, W, C), mask_buf.reshape(batch, cells, mask_w), act_buf.reshape(batch, cells, -1)
-        b_logp, b_adv, b_ret, b_val = logp_buf.reshape(-1), adv.reshape(-1), ret_buf.reshape(-1), val_buf.reshape(-1)
+        b_obs, b_mask, b_act = buf["obs"].reshape(batch, H, W, C), buf["mask"].reshape(batch, cells, mask_w), buf["act"].reshape(batch, cells, -1)
+        b_logp, b_adv, b_ret = buf["logp"].reshape(-1), adv.reshape(-1), ret_buf.reshape(-1)
         mb = batch // args.minibatches
         model.train()
         stats = defaultdict(list)
@@ -392,47 +404,77 @@ def main(argv=None):
                 logits, value = forward(model, o)
                 _, newlogp, ent, _ = masked_policy(logits, m, a)
                 v_loss = 0.5 * ((value - b_ret[i]) ** 2).mean()
-                if teaching:
+                if buf["teaching"]:
                     bc_loss = -newlogp.mean()
                     loss = bc_loss + args.vf_coef * v_loss
-                    stats["bc_loss"].append(bc_loss.item())
+                    stats["bc_loss"].append(bc_loss.detach())
                 else:
                     ratio = (newlogp - b_logp[i]).exp()
                     ad = b_adv[i]
                     ad = (ad - ad.mean()) / (ad.std() + 1e-8)
                     pg_loss = torch.max(-ad * ratio, -ad * ratio.clamp(1 - args.clip, 1 + args.clip)).mean()
                     loss = pg_loss - args.ent_coef * ent.mean() + args.vf_coef * v_loss
-                    stats["pg_loss"].append(pg_loss.item())
-                    stats["entropy"].append(ent.mean().item())
-                stats["v_loss"].append(v_loss.item())
+                    stats["pg_loss"].append(pg_loss.detach())
+                    stats["entropy"].append(ent.mean().detach())
+                stats["v_loss"].append(v_loss.detach())
                 opt.zero_grad()
                 scaler.scale(loss).backward()
                 scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 scaler.step(opt)
                 scaler.update()
+        out["stats"] = {k: float(torch.stack(v).mean()) for k, v in stats.items()}
+        out["time"] = time.time() - t_upd
 
-        t_upd = time.time() - t_upd
-        sps = int((global_step - start_step) / (time.time() - t0))
+    def finish(update, phase, t_roll, step, out):
+        """Log one update, take snapshots and save the checkpoint."""
+        stats = out["stats"]
+        sps = int((step - start_step) / (time.time() - t0))
         win = np.mean(recent["all"]) if recent["all"] else float("nan")
         per_opp = " ".join(
             f"{k}={np.mean([x == 1 for x in v]):.0%}" for k, v in sorted(recent.items()) if k != "all" and v
         )
-        mean = lambda k: float(np.mean(stats[k])) if stats[k] else float("nan")  # noqa: E731
-        phase = "bc" if teaching else "ppo"
-        print(f"[{phase}] step {global_step:>9,}  sps {sps:>5}  return {np.mean(returns) if returns else float('nan'):7.2f}  "
-              f"score {win:+.2f}  rollout {t_roll:.1f}s update {t_upd:.1f}s  wins {per_opp}", flush=True)
-        writer.writerow([global_step, phase, sps, len(recent["all"]), np.mean(returns) if returns else "", win, per_opp,
-                         mean("pg_loss"), mean("v_loss"), mean("entropy"), mean("bc_loss")])
+        print(f"[{phase}] step {step:>9,}  sps {sps:>5}  return {np.mean(returns) if returns else float('nan'):7.2f}  "
+              f"score {win:+.2f}  rollout {t_roll:.1f}s update {out['time']:.1f}s  wins {per_opp}", flush=True)
+        writer.writerow([step, phase, sps, len(recent["all"]), np.mean(returns) if returns else "", win, per_opp,
+                         *(stats.get(k, float("nan")) for k in ("pg_loss", "v_loss", "entropy", "bc_loss"))])
         metrics.flush()
-
-        if not teaching and update % args.snapshot_every == 0:
+        if phase == "ppo" and update % args.snapshot_every == 0:
             take_snapshot(update)
-        save_checkpoint(latest, model, {"global_step": global_step, "optimizer": opt.state_dict(),
+        save_checkpoint(latest, model, {"global_step": step, "optimizer": opt.state_dict(),
                                         "snapshots": snapshots, "maps": maps, "args": vars(args)})
+        if actor is not model:
+            actor.load_state_dict(model.state_dict())
+
+    pending = None  # (thread, update, phase, t_roll, step, out) of an update still training
+    for update in range(1, num_updates + 1):
+        if teaching and global_step >= args.bc_steps:
+            teaching = False
+            vec.broadcast("teach", False)
+            print("behaviour cloning done, switching to PPO")
+        buf = buffers[update % len(buffers)]
+        t_roll = time.time()
+        collect(buf)
+        t_roll = time.time() - t_roll
+        if pending is not None:
+            pending[0].join()
+            finish(*pending[1:])
+        out = {}
+        lr = (1.0 - (update - 1.0) / num_updates) * args.lr
+        phase = "bc" if buf["teaching"] else "ppo"
+        if async_update:
+            th = threading.Thread(target=learn, args=(buf, lr, out))
+            th.start()
+            pending = (th, update, phase, t_roll, global_step, out)
+        else:
+            learn(buf, lr, out)
+            finish(update, phase, t_roll, global_step, out)
         if args.time_limit and time.time() - t0 > args.time_limit * 60:
             print(f"time limit reached at step {global_step:,}")
             break
+    if pending is not None:
+        pending[0].join()
+        finish(*pending[1:])
 
     metrics.close()
     vec.close()
