@@ -6,7 +6,7 @@ import pytest
 pytest.importorskip("jax")
 
 from microrts_pz.bots import RandomBot, WorkerRushBot  # noqa: E402
-from microrts_pz.engine import TYPE_ATTACK_LOCATION, TYPE_NONE, TYPE_PRODUCE  # noqa: E402
+from microrts_pz.engine import TYPE_ATTACK_LOCATION, TYPE_PRODUCE  # noqa: E402
 from microrts_pz.game import MicroRTSGame  # noqa: E402
 from microrts_pz.jax_engine import JaxBatchGame  # noqa: E402
 from microrts_pz.unit_types import UnitTypeTable  # noqa: E402
