@@ -143,8 +143,8 @@ def jax_rollout(map_path, B, T, repeats, dtype):
     import jax
     import jax.numpy as jnp
 
-    sys.path.insert(0, HERE)
-    import jax_policy as P
+    sys.path.insert(0, os.path.join(HERE, "..", "..", "training"))
+    import jax_model as P
 
     from microrts_pz.jax_engine import JaxBatchGame
 
@@ -250,8 +250,8 @@ def jax_update(data, minibatches, repeats, dtype):
     import jax
     import jax.numpy as jnp
 
-    sys.path.insert(0, HERE)
-    import jax_policy as P
+    sys.path.insert(0, os.path.join(HERE, "..", "..", "training"))
+    import jax_model as P
 
     dims = (6, 4, 4, 4, 4, 7, 49)
     dt = {"float32": jnp.float32, "bfloat16": jnp.bfloat16, "float16": jnp.float16}[dtype]

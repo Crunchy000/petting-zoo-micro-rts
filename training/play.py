@@ -5,6 +5,9 @@
     python training/play.py runs/16x16/latest.pt --opponent mixed --record replays/ --record-games 3
 
 Pass a second checkpoint as ``--opponent path/to/other.pt`` for agent-vs-agent games.
+Checkpoints can be PyTorch ``.pt`` files (``train_selfplay.py``, or the
+``latest.pt`` that ``train_jax.py`` exports) or ``train_jax.py``'s ``.pkl``
+files, which play through JAX and need no PyTorch.
 """
 
 from __future__ import annotations
@@ -14,36 +17,55 @@ import os
 import sys
 
 import numpy as np
-import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from model import PolicyBot  # noqa: E402
-from train_selfplay import BOTS  # noqa: E402
+from opponents import BOTS  # noqa: E402
 
 from microrts_pz import microrts_v0  # noqa: E402
 
 
+def load_agent(path: str, device: str, deterministic: bool = False, seed: int = 0):
+    """A bot that plays the checkpoint at ``path`` (PyTorch for ``.pt``, JAX for ``.pkl``)."""
+    if path.endswith(".pkl"):
+        from jax_model import JaxPolicyBot
+
+        return JaxPolicyBot(path, deterministic=deterministic, seed=seed)
+    from model import PolicyBot
+
+    return PolicyBot(path, device=device, deterministic=deterministic, seed=seed)
+
+
 def make_opponent(name: str, seed: int, device: str):
-    if name.endswith(".pt"):
-        return PolicyBot(name, device=device)
+    if name.endswith((".pt", ".pkl")):
+        return load_agent(name, device, seed=seed)
     return BOTS[name](seed)
+
+
+def default_device() -> str:
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("checkpoint")
     ap.add_argument("--map", default="maps/16x16/basesWorkers16x16.xml")
-    ap.add_argument("--opponent", default="mixed", help=f"one of {sorted(BOTS)} or a .pt checkpoint")
+    ap.add_argument("--opponent", default="mixed", help=f"one of {sorted(BOTS)} or a .pt/.pkl checkpoint")
     ap.add_argument("--games", type=int, default=10)
     ap.add_argument("--max-steps", type=int, default=2000)
     ap.add_argument("--deterministic", action="store_true", help="take the most likely action instead of sampling")
     ap.add_argument("--record", help="directory for HTML replays")
     ap.add_argument("--record-games", type=int, default=2, help="how many replays to keep (wins first, then the most unit types)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--device", default=None, help="PyTorch device for .pt checkpoints (default: cuda when available)")
     args = ap.parse_args(argv)
 
-    agent = PolicyBot(args.checkpoint, device=args.device, deterministic=args.deterministic, seed=args.seed)
+    args.device = args.device or default_device()
+    agent = load_agent(args.checkpoint, args.device, deterministic=args.deterministic, seed=args.seed)
     env = microrts_v0.parallel_env(map_path=args.map, max_steps=args.max_steps, record_replay=bool(args.record))
     results, kept = [], []
     for g in range(args.games):

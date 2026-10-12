@@ -27,4 +27,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[test,jax]"
-      - run: pytest -q tests/test_jax_engine.py
+      - run: pytest -q tests/test_jax_engine.py tests/test_train_jax.py
