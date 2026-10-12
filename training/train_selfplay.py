@@ -218,6 +218,7 @@ def main(argv=None):
     ap.add_argument("--max-grad-norm", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--no-amp", action="store_true", help="train in float32 on the GPU (mixed precision is ~10x faster on a T4)")
     args = ap.parse_args(argv)
 
     maps = args.map or ["maps/16x16/basesWorkers16x16.xml"]
@@ -237,6 +238,13 @@ def main(argv=None):
     # Workers fork before CUDA is initialised.
     vec = VecGames(args.num_envs, args.num_workers, maps, env_kwargs, args.seed, opp_weights, teach=args.bc_steps > 0)
     device = torch.device(args.device)
+    amp = device.type == "cuda" and not args.no_amp
+    scaler = torch.amp.GradScaler("cuda", enabled=amp)
+
+    def forward(net, x):
+        with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
+            logits, value = net(x)
+        return logits.float(), value.float()
 
     latest = os.path.join(args.out, "latest.pt")
     start_step, snapshots = 0, []
@@ -316,9 +324,9 @@ def main(argv=None):
             obs_buf[t], mask_buf[t], done_buf[t] = obs, mask, next_done
             with torch.no_grad():
                 if teaching:  # the bots act; only the value head is trained
-                    act, logp, value = None, None, model(obs)[1]
+                    act, logp, value = None, None, forward(model, obs)[1]
                 else:
-                    logits, value = model(obs)
+                    logits, value = forward(model, obs)
                     act, logp, _, _ = masked_policy(logits, mask)
             val_buf[t] = value
             learner = act.cpu().numpy() if act is not None else [None] * N
@@ -333,7 +341,7 @@ def main(argv=None):
                 o = torch.as_tensor(np.stack([state[i][2] for i in idx])).to(device)
                 m = torch.as_tensor(np.stack([state[i][3] for i in idx]).reshape(len(idx), cells, mask_w)).to(device).bool()
                 with torch.no_grad():
-                    a, *_ = masked_policy(net(o)[0], m)
+                    a, *_ = masked_policy(forward(net, o)[0], m)
                 a = a.cpu().numpy()
                 for j, i in enumerate(idx):
                     opp_actions[i] = a[j]
@@ -360,7 +368,7 @@ def main(argv=None):
         t_upd = time.time()
         with torch.no_grad():
             obs = torch.as_tensor(np.stack([s[0] for s in state])).to(device)
-            next_value = model(obs)[1]
+            next_value = forward(model, obs)[1]
         adv = torch.zeros((T, N), device=device)
         last = torch.zeros(N, device=device)
         for t in reversed(range(T)):
@@ -381,7 +389,7 @@ def main(argv=None):
             for s in range(0, batch, mb):
                 i = perm[s : s + mb]
                 o, m, a = b_obs[i], b_mask[i], b_act[i]
-                logits, value = model(o)
+                logits, value = forward(model, o)
                 _, newlogp, ent, _ = masked_policy(logits, m, a)
                 v_loss = 0.5 * ((value - b_ret[i]) ** 2).mean()
                 if teaching:
@@ -398,9 +406,11 @@ def main(argv=None):
                     stats["entropy"].append(ent.mean().item())
                 stats["v_loss"].append(v_loss.item())
                 opt.zero_grad()
-                loss.backward()
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                opt.step()
+                scaler.step(opt)
+                scaler.update()
 
         t_upd = time.time() - t_upd
         sps = int((global_step - start_step) / (time.time() - t0))
