@@ -236,6 +236,17 @@ from it.
 website's [maps page](https://crunchy000.github.io/petting-zoo-micro-rts/maps.html)
 has a replay and both agents' win rates for every bundled map.
 
+Two later runs continue from `agent_16x16_maps.pt`.
+`training/agents/agent_16x16_v3.pt` adds 300M steps on 17 16×16 maps, including
+`melee16x16Mixed12`. It wins 75 to 100% on the twelve `basesWorkers16x16` maps
+(94% on average, up from 84%) and 62% on `TwoBasesBarracks16x16` and
+`melee16x16Mixed12`. `training/agents/agent_24x24.pt` adds 139M steps on the 13
+`basesWorkers24x24` maps and `barricades24x24`, with games allowed to run to
+5,000 ticks (`--max-steps 5000`). Evaluated with the same limit, it wins 25% on
+`basesWorkers24x24` and 42% on the unseen `basesWorkers32x32A`, where the
+earlier agents only drew or lost, but it still loses most 24×24 games when it
+starts in the first player's corner.
+
 ```bash
 pip install -e ".[jax]"          # plus "jax[cuda12]" on an NVIDIA GPU
 python training/train_jax.py --map maps/8x8/basesWorkers8x8A.xml --bc-steps 1000000 --max-steps 1000 --out runs/8x8
