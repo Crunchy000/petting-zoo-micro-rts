@@ -27,6 +27,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from orient import mask_permutation, rotate_action, rotate_mask, rotate_obs
+
 NEG = -1e8
 #: For components 1..6, the action type they parameterise (move, harvest, return, produce, produce, attack).
 COMPONENT_TYPE = (0, 1, 2, 3, 4, 4, 5)
@@ -266,7 +268,7 @@ def load_checkpoint(path: str) -> dict:
         import torch
 
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
-        return {"config": ckpt["config"], "params": from_torch(ckpt["state_dict"])}
+        return {"config": ckpt["config"], "params": from_torch(ckpt["state_dict"]), "rotate_side": ckpt.get("rotate_side")}
     with open(path, "rb") as f:
         ckpt = pickle.load(f)
     ckpt["params"] = jax.tree.map(jnp.asarray, ckpt["params"])
@@ -282,9 +284,16 @@ def load_params(path: str):
 class JaxPolicyBot:
     """A trained policy with the ``act(game, player)`` interface of ``microrts_pz.bots`` (no PyTorch needed)."""
 
-    def __init__(self, path_or_params, deterministic: bool = False, seed: int = 0, config: dict | None = None):
+    def __init__(self, path_or_params, deterministic: bool = False, seed: int = 0, config: dict | None = None,
+                 rotate_side: int | None | str = "auto"):
+        #: the side whose board is turned 180 degrees before the policy sees it (``orient.py``);
+        #: ``"auto"`` takes the checkpoint's ``rotate_side``
+        self.rotate_side = None if rotate_side == "auto" else rotate_side
         if isinstance(path_or_params, str):
-            self.params, config = load_params(path_or_params)
+            ckpt = load_checkpoint(path_or_params)
+            self.params, config = ckpt["params"], ckpt["config"]
+            if rotate_side == "auto":
+                self.rotate_side = ckpt.get("rotate_side")
         else:
             self.params = path_or_params
         config = config or config_of(self.params)
@@ -301,6 +310,9 @@ class JaxPolicyBot:
 
     def act(self, game, player: int) -> np.ndarray:
         self.key, k = jax.random.split(self.key)
-        obs = jnp.asarray(game.observation(player)[None])
-        mask = jnp.asarray(game.action_mask(player)[None]).astype(bool)
-        return np.asarray(self._act(self.params, k, obs, mask))[0]
+        obs, mask = game.observation(player), game.action_mask(player)
+        rot = player == self.rotate_side
+        if rot:
+            obs, mask = rotate_obs(obs), rotate_mask(mask, mask_permutation(game.action_dims))
+        act = np.asarray(self._act(self.params, k, jnp.asarray(obs[None]), jnp.asarray(mask[None]).astype(bool)))[0]
+        return rotate_action(act.reshape(game.num_cells, -1), game.action_dims) if rot else act

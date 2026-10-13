@@ -24,15 +24,15 @@ from opponents import BOTS  # noqa: E402
 from microrts_pz import microrts_v0  # noqa: E402
 
 
-def load_agent(path: str, device: str, deterministic: bool = False, seed: int = 0):
+def load_agent(path: str, device: str, deterministic: bool = False, seed: int = 0, rotate_side="auto"):
     """A bot that plays the checkpoint at ``path`` (PyTorch for ``.pt``, JAX for ``.pkl``)."""
     if path.endswith(".pkl"):
         from jax_model import JaxPolicyBot
 
-        return JaxPolicyBot(path, deterministic=deterministic, seed=seed)
+        return JaxPolicyBot(path, deterministic=deterministic, seed=seed, rotate_side=rotate_side)
     from model import PolicyBot
 
-    return PolicyBot(path, device=device, deterministic=deterministic, seed=seed)
+    return PolicyBot(path, device=device, deterministic=deterministic, seed=seed, rotate_side=rotate_side)
 
 
 def make_opponent(name: str, seed: int, device: str):
@@ -61,11 +61,15 @@ def main(argv=None):
     ap.add_argument("--record", help="directory for HTML replays")
     ap.add_argument("--record-games", type=int, default=2, help="how many replays to keep (wins first, then the most unit types)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--rotate-side", choices=("auto", "0", "1", "none"), default="auto",
+                    help="turn this side's board 180 degrees before the agent sees it (orient.py); "
+                         "auto = what the checkpoint was trained with")
     ap.add_argument("--device", default=None, help="PyTorch device for .pt checkpoints (default: cuda when available)")
     args = ap.parse_args(argv)
 
     args.device = args.device or default_device()
-    agent = load_agent(args.checkpoint, args.device, deterministic=args.deterministic, seed=args.seed)
+    rot = int(args.rotate_side) if args.rotate_side.isdigit() else {"auto": "auto", "none": None}[args.rotate_side]
+    agent = load_agent(args.checkpoint, args.device, deterministic=args.deterministic, seed=args.seed, rotate_side=rot)
     env = microrts_v0.parallel_env(map_path=args.map, max_steps=args.max_steps, record_replay=bool(args.record))
     results, kept = [], []
     for g in range(args.games):

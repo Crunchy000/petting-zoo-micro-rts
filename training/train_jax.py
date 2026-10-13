@@ -21,7 +21,11 @@ How it trains (the same recipe as ``train_selfplay.py``):
   and army going much sooner than PPO from scratch.
 * Then PPO with GAE, clipped objective, entropy bonus and a linearly decayed
   learning rate. Every ``--snapshot-every`` updates the current weights join
-  the ring of ``--keep-snapshots`` self-play opponents.
+  the ring of ``--keep-snapshots`` self-play opponents. ``--frozen`` adds
+  earlier checkpoints that stay in the self-play pool for the whole run.
+* ``--rotate-side 0`` turns player 0's board 180 degrees (``orient.py``),
+  so the network sees every game from player 1's corner and learns one set
+  of habits for both sides. ``play.py`` reads the setting from the checkpoint.
 
 What is different from the PyTorch trainer, for speed:
 
@@ -56,6 +60,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opponents import BOT_SPECS, TEACHERS, parse_weights  # noqa: E402
+from orient import mask_permutation, rotate_action, rotate_mask, rotate_obs  # noqa: E402
 
 
 #: Training statistics written to ``metrics.csv`` (averaged over an update's minibatches).
@@ -104,6 +109,10 @@ def main(argv=None):
     ap.add_argument("--bc-steps", type=int, default=0, help="behaviour-cloning warm start: env steps imitating the bots")
     ap.add_argument("--snapshot-every", type=int, default=20, help="updates between self-play snapshots")
     ap.add_argument("--keep-snapshots", type=int, default=4, help="snapshots used as self-play opponents")
+    ap.add_argument("--frozen", action="append", default=[],
+                    help="an earlier checkpoint that joins the self-play opponents and is never replaced (repeatable)")
+    ap.add_argument("--rotate-side", type=int, choices=(0, 1), default=None,
+                    help="turn this side's board 180 degrees so the network sees every game from one corner (orient.py)")
     ap.add_argument("--init", help="start from this checkpoint (.pkl from this script or a PyTorch .pt)")
     ap.add_argument("--resume", action="store_true", help="continue from --out/latest.pkl")
     ap.add_argument("--width", type=int, default=64, help="network channels")
@@ -135,8 +144,9 @@ def main(argv=None):
     dtype = {"float32": jnp.float32, "bfloat16": jnp.bfloat16}[args.dtype or ("float32" if backend == "cpu" else "bfloat16")]
     weights = parse_weights(args.opponents)
     K = args.keep_snapshots
+    S = K + len(args.frozen)  # self-play slots: the snapshot ring, then the frozen checkpoints
     N, T = args.num_envs, args.num_steps
-    names = slot_layout(N, weights, K)
+    names = slot_layout(N, weights, S)
     pool = sorted(set(names), key=names.index)
     n_self = names.count("self")
     rush_lo = n_self
@@ -149,6 +159,7 @@ def main(argv=None):
     H, W, C = games.height, games.width, games.num_channels
     dims = tuple(int(d) for d in games.action_dims)
     mask_size = games.mask_size
+    mask_perm = jnp.asarray(mask_permutation(dims))
     reward_w = jnp.asarray(DEFAULT_REWARD_WEIGHT, jnp.float32)
 
     def bot_arrays(specs):
@@ -173,8 +184,9 @@ def main(argv=None):
         params, opt = ckpt["params"], jax.tree.map(jnp.asarray, ckpt["optimizer"])
         snapshots = jax.tree.map(jnp.asarray, ckpt["snapshots"])
         start_step, n_snapped, update0 = ckpt["global_step"], ckpt["n_snapshots"], ckpt["update"]
-        if jax.tree.leaves(snapshots)[0].shape[0] != K:
-            raise SystemExit(f"{latest} has {jax.tree.leaves(snapshots)[0].shape[0]} snapshots; pass that --keep-snapshots")
+        if jax.tree.leaves(snapshots)[0].shape[0] != S:
+            raise SystemExit(f"{latest} has {jax.tree.leaves(snapshots)[0].shape[0]} self-play opponents; "
+                             "pass the same --keep-snapshots and --frozen")
         print(f"resumed from {latest} at step {start_step:,}")
     else:
         if args.init:
@@ -185,7 +197,11 @@ def main(argv=None):
         else:
             params = P.init_params(jax.random.PRNGKey(args.seed), C, dims, width=args.width)
         opt = P.adam_init(params)
-        snapshots = jax.tree.map(lambda p: jnp.broadcast_to(p, (K,) + p.shape), params)
+        frozen = [P.load_params(f)[0] for f in args.frozen]
+        if any(jax.tree.map(jnp.shape, f) != jax.tree.map(jnp.shape, params) for f in frozen):
+            raise SystemExit("every --frozen checkpoint needs the same network shape as the learner")
+        snapshots = jax.tree.map(lambda p, *fs: jnp.concatenate([jnp.broadcast_to(p, (K,) + p.shape), *(f[None] for f in fs)]),
+                                 params, *frozen)
     n_params = sum(int(np.prod(p.shape)) for p in jax.tree.leaves(params))
     print(f"map {H}x{W}, {n_params:,} parameters, {backend} ({jax.devices()[0].device_kind}), {jnp.dtype(dtype).name}, "
           f"{N} games: " + ", ".join(f"{n} {names.count(n)}" for n in pool))
@@ -198,6 +214,20 @@ def main(argv=None):
         return jax.vmap(lambda s, p, h, a, n, c: rush_actions(rules, s, p, h, a, n, c, ids["Worker"], ids["Barracks"], ids["Light"]))(
             state, player, harv, army, n_army, counter)
 
+    def to_view(obs, mask, player):
+        """Observations and masks as the network sees them (turned for ``--rotate-side``)."""
+        if args.rotate_side is None:
+            return obs, mask
+        r = player == args.rotate_side
+        return (jnp.where(r[:, None, None, None], rotate_obs(obs, jnp), obs),
+                jnp.where(r[:, None, None], rotate_mask(mask, mask_perm, jnp), mask))
+
+    def turn(act, player):
+        """Actions between the network's view and the board (the rotation is its own inverse)."""
+        if args.rotate_side is None:
+            return act
+        return jnp.where((player == args.rotate_side)[:, None, None], rotate_action(act, dims, jnp), act)
+
     def block(tree, lo, hi):
         return jax.tree.map(lambda x: x[lo:hi], tree)
 
@@ -208,22 +238,25 @@ def main(argv=None):
             gs, side, counter, key, ep_ret = c
             key, k_learn, k_opp, k_rand, k_side = jax.random.split(key, 5)
             idx = jnp.arange(N)
-            obs, mask = games.observe_fn(gs, side)
+            obs, mask = to_view(*games.observe_fn(gs, side), side)
             opp_obs, opp_mask = games.observe_fn(gs, 1 - side)
             logits, value = forward(params, obs)
             if teaching:
-                act, counter_l = rush_block(gs, side, *teacher, counter[idx, side])
+                board_act, counter_l = rush_block(gs, side, *teacher, counter[idx, side])
                 counter = counter.at[idx, side].set(counter_l)
+                act = turn(board_act, side)
                 logp = jnp.zeros(N)
             else:
                 act, logp = P.sample(k_learn, logits, mask, dims)
+                board_act = turn(act, side)
             # opponents, block by block
             parts = []
             if n_self:
-                o = opp_obs[:n_self].reshape((K, n_self // K) + opp_obs.shape[1:])
-                lg, _ = jax.vmap(forward)(snapshots, o)
-                a, _ = P.sample(k_opp, lg.reshape((n_self,) + lg.shape[2:]), opp_mask[:n_self], dims)
-                parts.append(a)
+                self_side = 1 - side[:n_self]
+                o, m = to_view(opp_obs[:n_self], opp_mask[:n_self], self_side)
+                lg, _ = jax.vmap(forward)(snapshots, o.reshape((S, n_self // S) + o.shape[1:]))
+                a, _ = P.sample(k_opp, lg.reshape((n_self,) + lg.shape[2:]), m, dims)
+                parts.append(turn(a, self_side))
             if rush_hi > rush_lo:
                 opp = 1 - side[rush_lo:rush_hi]
                 rows = idx[rush_lo:rush_hi]
@@ -234,7 +267,7 @@ def main(argv=None):
                 parts.append(random_actions(rules, k_rand, opp_mask[rush_hi:]))
             opp_act = jnp.concatenate(parts) if len(parts) > 1 else parts[0]
             first = (side == 0)[:, None, None]
-            gs, raw, over, trunc, winner, _ = games.step_fn(gs, jnp.where(first, act, opp_act), jnp.where(first, opp_act, act))
+            gs, raw, over, trunc, winner, _ = games.step_fn(gs, jnp.where(first, board_act, opp_act), jnp.where(first, opp_act, board_act))
             r = (raw @ reward_w)[idx, side]
             done = over | trunc
             result = jnp.where(winner < 0, 0, jnp.where(winner == side, 1, -1))
@@ -247,7 +280,7 @@ def main(argv=None):
             return (gs, side, counter, key, ep_ret), out
 
         carry, buf = jax.lax.scan(step, carry, None, length=T)
-        obs, _ = games.observe_fn(carry[0], carry[1])
+        obs, _ = to_view(*games.observe_fn(carry[0], carry[1]), carry[1])
         next_value = forward(params, obs)[1]
         # GAE
         def gae(last, x):
@@ -303,10 +336,11 @@ def main(argv=None):
 
     def save(step, update):
         extra = {"optimizer": jax.tree.map(np.asarray, opt), "snapshots": jax.tree.map(np.asarray, snapshots),
-                 "n_snapshots": n_snapped, "global_step": step, "update": update, "maps": maps, "args": vars(args)}
+                 "n_snapshots": n_snapped, "global_step": step, "update": update, "maps": maps, "args": vars(args),
+                 "rotate_side": args.rotate_side}
         P.save_checkpoint(latest, params, extra, action_dims=dims)
         if has_torch:
-            P.export_torch(os.path.join(args.out, "latest.pt"), params, {"global_step": step, "maps": maps}, action_dims=dims)
+            P.export_torch(os.path.join(args.out, "latest.pt"), params, {"global_step": step, "maps": maps, "rotate_side": args.rotate_side}, action_dims=dims)
 
     # ------------------------------------------------------------------- loop
     key = jax.random.PRNGKey(args.seed + 7919 * update0)

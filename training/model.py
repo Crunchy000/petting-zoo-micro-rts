@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from orient import mask_permutation, rotate_action, rotate_mask, rotate_obs
+
 #: Component dims ``[type, move_dir, harvest_dir, return_dir, produce_dir, produce_type, attack_target]``
 #: for the bundled unit type tables (7 unit types, max attack range 3).
 ACTION_DIMS = (6, 4, 4, 4, 4, 7, 49)
@@ -139,8 +141,15 @@ def load_policy(path: str, device: str | torch.device = "cpu") -> GridnetPolicy:
 class PolicyBot:
     """Wraps a trained policy with the same ``act(game, player)`` interface as ``microrts_pz.bots``."""
 
-    def __init__(self, model: GridnetPolicy | str, device: str = "cpu", deterministic: bool = False, seed: int | None = None):
+    def __init__(self, model: GridnetPolicy | str, device: str = "cpu", deterministic: bool = False, seed: int | None = None,
+                 rotate_side: int | None | str = "auto"):
         self.model = load_policy(model, device) if isinstance(model, str) else model
+        #: the side whose board is turned 180 degrees before the policy sees it (``orient.py``);
+        #: ``"auto"`` takes the checkpoint's ``rotate_side``
+        self.rotate_side = rotate_side
+        if rotate_side == "auto":
+            saved = torch.load(model, map_location="cpu", weights_only=False) if isinstance(model, str) else {}
+            self.rotate_side = saved.get("rotate_side")
         self.device = device
         self.deterministic = deterministic
         if seed is not None:
@@ -148,8 +157,11 @@ class PolicyBot:
 
     @torch.no_grad()
     def act(self, game, player: int) -> np.ndarray:
-        obs = torch.as_tensor(game.observation(player)[None], device=self.device)
-        mask = torch.as_tensor(game.action_mask(player)[None], device=self.device).bool()
-        logits, _ = self.model(obs)
-        act, *_ = masked_policy(logits, mask, deterministic=self.deterministic)
-        return act[0].cpu().numpy()
+        obs, mask = game.observation(player), game.action_mask(player)
+        rot = player == self.rotate_side
+        if rot:
+            obs, mask = rotate_obs(obs).copy(), rotate_mask(mask, mask_permutation(game.action_dims)).copy()
+        logits, _ = self.model(torch.as_tensor(obs[None], device=self.device))
+        act, *_ = masked_policy(logits, torch.as_tensor(mask[None], device=self.device).bool(), deterministic=self.deterministic)
+        act = act[0].cpu().numpy()
+        return rotate_action(act.reshape(game.num_cells, -1), game.action_dims) if rot else act
