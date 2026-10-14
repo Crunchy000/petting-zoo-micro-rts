@@ -97,3 +97,21 @@ def test_trains_saves_resumes_and_plays(tmp_path):
     if os.path.exists(os.path.join(out, "latest.pt")):  # written when PyTorch is installed
         play.main([os.path.join(out, "latest.pt"), "--map", "maps/8x8/basesWorkers8x8A.xml", "--opponent",
                    os.path.join(out, "latest.pkl"), "--games", "1", "--max-steps", "30"])
+
+
+def test_rotated_side_and_frozen_opponents(tmp_path):
+    first = str(tmp_path / "first")
+    common = ["--map", "maps/8x8/basesWorkers8x8A.xml", "--num-envs", "16", "--num-steps", "8",
+              "--minibatch-size", "64", "--width", "8", "--keep-snapshots", "2", "--opponents", "self:1,rush:1"]
+    train_jax.main(common + ["--out", first, "--total-steps", "128"])
+    out = str(tmp_path / "run")
+    frozen = os.path.join(first, "latest.pkl")
+    train_jax.main(common + ["--out", out, "--total-steps", "256", "--bc-steps", "128", "--rotate-side", "0",
+                             "--frozen", frozen])
+    ckpt = P.load_checkpoint(os.path.join(out, "latest.pkl"))
+    assert ckpt["rotate_side"] == 0
+    assert jax.tree.leaves(ckpt["snapshots"])[0].shape[0] == 3  # two ring slots and the frozen checkpoint
+    train_jax.main(common + ["--out", out, "--total-steps", "384", "--rotate-side", "0", "--frozen", frozen, "--resume"])
+
+    bot = P.JaxPolicyBot(os.path.join(out, "latest.pkl"))
+    assert bot.rotate_side == 0

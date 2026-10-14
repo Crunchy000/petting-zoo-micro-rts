@@ -247,6 +247,16 @@ Two later runs continue from `agent_16x16_maps.pt`.
 earlier agents only drew or lost, but it still loses most 24×24 games when it
 starts in the first player's corner.
 
+A further round added two trainer options. `--rotate-side 0` turns player 0's
+board 180 degrees (`training/orient.py`), so the network sees every game from
+the same corner. `--frozen <checkpoint>` keeps older agents in the self-play
+pool. `agent_24x24_v2.pt`, trained this way for 97M more steps, wins 59% on
+`basesWorkers24x24` over 32 games (up from 53%) but does worse on the unseen
+32×32 map. Two specialists, `agent_nowheretorun.pt` and `agent_letmeout.pt`,
+each trained on a single map, win 66% and 97% there, where the general agents
+won at most 41%. Checkpoints trained with the board turn apply it on their own
+in `play.py`.
+
 ```bash
 pip install -e ".[jax]"          # plus "jax[cuda12]" on an NVIDIA GPU
 python training/train_jax.py --map maps/8x8/basesWorkers8x8A.xml --bc-steps 1000000 --max-steps 1000 --out runs/8x8
